@@ -11,9 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # PyTorch with CUDA
 RUN pip3 install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Qwen TTS from HuggingFace space
+# Python deps
 RUN pip3 install --no-cache-dir \
-    transformers \
+    transformers>=4.45.0 \
     accelerate \
     soundfile \
     scipy \
@@ -23,8 +23,10 @@ RUN pip3 install --no-cache-dir \
     huggingface_hub \
     python-multipart
 
-# Install qwen_tts package from the space
-RUN pip3 install --no-cache-dir git+https://huggingface.co/spaces/Qwen/Qwen3-TTS
+# Clone and install qwen_tts from HuggingFace space
+RUN git clone --depth 1 https://huggingface.co/spaces/Qwen/Qwen3-TTS /tmp/qwen3-tts && \
+    pip3 install --no-cache-dir /tmp/qwen3-tts && \
+    rm -rf /tmp/qwen3-tts
 
 COPY server.py /app/server.py
 
