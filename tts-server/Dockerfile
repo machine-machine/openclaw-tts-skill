@@ -12,13 +12,15 @@ RUN apt-get update && \
     echo "=== FFmpeg encoders ===" && \
     ffmpeg -encoders 2>/dev/null | grep -E "libopus|libmp3lame|libvorbis" || echo "Warning: Some codecs missing"
 
-# Only install qwen-tts and its deps (torch already included)
+# Install qwen-tts and deps (torch already included)
+# flash-attn is optional but improves performance - may fail on some systems
 RUN pip install --no-cache-dir \
     qwen-tts \
     fastapi \
     "uvicorn[standard]" \
     python-multipart \
-    aiofiles
+    aiofiles && \
+    pip install --no-cache-dir flash-attn --no-build-isolation || echo "flash-attn install failed (optional)"
 
 COPY server.py /app/server.py
 
