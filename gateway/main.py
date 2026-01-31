@@ -37,7 +37,7 @@ class SpeechRequest(BaseModel):
     text: str = Field(default=None, min_length=1, max_length=5000)
     input: str = Field(default=None, min_length=1, max_length=5000)  # OpenAI compat
     voice: str = Field(default="v")
-    format: Literal["mp3", "wav", "ogg"] = Field(default="wav")
+    format: Literal["mp3", "wav", "ogg", "opus"] = Field(default="wav")
     response_format: str = Field(default=None)  # OpenAI compat (maps to format)
     model: str = Field(default=None)  # OpenAI compat (ignored)
     stream: bool = Field(default=False)
@@ -63,7 +63,7 @@ class SpeechRequest(BaseModel):
 class SpeakFileRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000)
     voice: str = Field(default="default")
-    format: Literal["mp3", "wav", "ogg"] = Field(default="wav")
+    format: Literal["mp3", "wav", "ogg", "opus"] = Field(default="wav")
 
 client = httpx.AsyncClient(timeout=120.0)
 
