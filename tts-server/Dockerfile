@@ -4,12 +4,13 @@ FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 
-# Install ffmpeg with opus/mp3/vorbis codecs
+# Install ffmpeg with full codec support
+# libavcodec-extra includes non-free codecs like libopus, libmp3lame, libvorbis
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg libopus0 libmp3lame0 libvorbis0a && \
+    apt-get install -y ffmpeg libavcodec-extra58 && \
     rm -rf /var/lib/apt/lists/* && \
-    echo "=== FFmpeg codecs ===" && \
-    ffmpeg -codecs 2>/dev/null | grep -E "opus|mp3|vorbis" || true
+    echo "=== FFmpeg encoders ===" && \
+    ffmpeg -encoders 2>/dev/null | grep -E "libopus|libmp3lame|libvorbis" || echo "Warning: Some codecs missing"
 
 # Only install qwen-tts and its deps (torch already included)
 RUN pip install --no-cache-dir \
