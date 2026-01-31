@@ -14,10 +14,12 @@ from contextlib import asynccontextmanager
 import numpy as np
 import torch
 import soundfile as sf
-from fastapi import FastAPI, HTTPException, Response, Query, Request
+from fastapi import FastAPI, HTTPException, Response, Query, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+import aiofiles
+import shutil
 
 logging.basicConfig(
     level=logging.INFO,
@@ -206,6 +208,60 @@ async def get_speakers():
             "model_type": MODEL_TYPE,
             "note": "VoiceDesign uses instruct parameter to create voices"
         }
+
+@app.post("/voices/upload", tags=["Voice Cloning"])
+async def upload_voice(
+    file: UploadFile = File(...),
+    name: str = Form(..., description="Voice name (alphanumeric, no spaces)")
+):
+    """Upload reference audio for voice cloning (base model)"""
+    if MODEL_TYPE != "base":
+        raise HTTPException(status_code=400, detail="Voice upload only available for base model")
+    
+    # Validate name
+    safe_name = "".join(c for c in name if c.isalnum() or c == "_").lower()
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid voice name")
+    
+    # Validate file type
+    allowed_types = {".wav", ".mp3", ".ogg", ".flac"}
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {allowed_types}")
+    
+    # Save file
+    os.makedirs(REFERENCE_AUDIO_DIR, exist_ok=True)
+    file_path = os.path.join(REFERENCE_AUDIO_DIR, f"{safe_name}{ext}")
+    
+    try:
+        async with aiofiles.open(file_path, "wb") as f:
+            content = await file.read()
+            await f.write(content)
+        
+        logger.info(f"Uploaded voice '{safe_name}' ({len(content)} bytes)")
+        return {
+            "ok": True,
+            "voice_name": safe_name,
+            "file_path": file_path,
+            "size_bytes": len(content)
+        }
+    except Exception as e:
+        logger.error(f"Failed to save voice: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/voices/{name}", tags=["Voice Cloning"])
+async def delete_voice(name: str):
+    """Delete a reference voice"""
+    if MODEL_TYPE != "base":
+        raise HTTPException(status_code=400, detail="Voice management only available for base model")
+    
+    for ext in [".wav", ".mp3", ".ogg", ".flac"]:
+        path = os.path.join(REFERENCE_AUDIO_DIR, f"{name}{ext}")
+        if os.path.isfile(path):
+            os.remove(path)
+            return {"ok": True, "deleted": name}
+    
+    raise HTTPException(status_code=404, detail=f"Voice '{name}' not found")
 
 @app.get("/test", tags=["Testing"])
 async def test_tts():

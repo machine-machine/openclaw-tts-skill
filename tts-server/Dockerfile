@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir \
     qwen-tts \
     fastapi \
     "uvicorn[standard]" \
-    python-multipart
+    python-multipart \
+    aiofiles
 
 COPY server.py /app/server.py
 
