@@ -18,6 +18,8 @@ TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://coqui-tts:5002")
 TTS_TYPE = os.getenv("TTS_TYPE", "coqui")  # coqui, openai, piper
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")
 STORAGE_DIR = os.getenv("STORAGE_DIR", "/app/output")
+# Force all requests to use this voice (for voice cloning). Empty = use requested voice.
+DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "vivian")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
 app = FastAPI(title="m2 Voice Gateway", version="1.0.0")
@@ -97,6 +99,11 @@ async def synthesize_openai(text: str, voice: str, format: str, language: str = 
 
 async def synthesize(text: str, voice: str = "default", format: str = "wav", language: str = "auto", instruct: str = None) -> bytes:
     """Route to appropriate TTS backend"""
+    # Override voice with DEFAULT_VOICE if set (for voice cloning)
+    if DEFAULT_VOICE:
+        voice = DEFAULT_VOICE
+        logger.info(f"Using default voice override: {voice}")
+    
     if TTS_TYPE == "coqui":
         return await synthesize_coqui(text, voice if voice != "default" else None)
     elif TTS_TYPE == "openai":
