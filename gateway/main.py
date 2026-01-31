@@ -31,10 +31,24 @@ app.add_middleware(
 )
 
 class SpeechRequest(BaseModel):
-    text: str = Field(..., min_length=1, max_length=5000)
-    voice: str = Field(default="default")
+    # Accept both 'text' (our format) and 'input' (OpenAI format)
+    text: str = Field(default=None, min_length=1, max_length=5000)
+    input: str = Field(default=None, min_length=1, max_length=5000)  # OpenAI compat
+    voice: str = Field(default="vivian")
     format: Literal["mp3", "wav", "ogg"] = Field(default="wav")
+    response_format: str = Field(default=None)  # OpenAI compat (maps to format)
+    model: str = Field(default=None)  # OpenAI compat (ignored)
     stream: bool = Field(default=False)
+    
+    def get_text(self) -> str:
+        """Get text from either field"""
+        return self.text or self.input or ""
+    
+    def get_format(self) -> str:
+        """Get format, preferring response_format if set"""
+        if self.response_format:
+            return self.response_format.replace("audio/", "")
+        return self.format
 
 class SpeakFileRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000)
@@ -99,12 +113,19 @@ async def health():
 @app.post("/v1/audio/speech")
 async def openai_speech(request: SpeechRequest):
     """OpenAI-compatible TTS endpoint"""
+    text = request.get_text()
+    if not text:
+        raise HTTPException(status_code=422, detail="Either 'text' or 'input' field required")
+    
+    fmt = request.get_format()
+    logger.info(f"TTS request: voice={request.voice}, format={fmt}, text_len={len(text)}")
+    
     try:
-        audio = await synthesize(request.text, request.voice, request.format)
+        audio = await synthesize(text, request.voice, fmt)
         return Response(
             content=audio,
-            media_type=f"audio/{request.format}",
-            headers={"Content-Disposition": f"attachment; filename=speech.{request.format}"}
+            media_type=f"audio/{fmt}",
+            headers={"Content-Disposition": f"attachment; filename=speech.{fmt}"}
         )
     except httpx.RequestError as e:
         logger.error(f"Backend error: {e}")
