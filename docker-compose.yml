@@ -1,11 +1,11 @@
 version: "3.9"
 
 # m2 Voice - Qwen3-TTS
+# Simplified for Coolify
 
 services:
   qwen_tts:
     build: ./tts-server
-    container_name: m2-qwen-tts
     restart: unless-stopped
     shm_size: "4g"
     environment:
@@ -28,12 +28,9 @@ services:
       timeout: 10s
       retries: 10
       start_period: 300s
-    networks:
-      - internal
 
   speech_gateway:
     build: ./gateway
-    container_name: m2-voice-gateway
     restart: unless-stopped
     environment:
       - TTS_BASE_URL=http://qwen_tts:8000
@@ -50,15 +47,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    networks:
-      - coolify
-      - internal
 
 volumes:
   models:
   tts_output:
-
-networks:
-  coolify:
-    external: true
-  internal:
