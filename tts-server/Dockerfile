@@ -5,28 +5,23 @@ WORKDIR /app
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip git curl libsndfile1 \
+    python3 python3-pip curl libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 # PyTorch with CUDA
 RUN pip3 install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Python deps
+# Python deps + qwen-tts from PyPI
 RUN pip3 install --no-cache-dir \
+    qwen-tts \
     transformers>=4.45.0 \
     accelerate \
     soundfile \
     scipy \
-    numpy \
     fastapi \
     "uvicorn[standard]" \
     huggingface_hub \
     python-multipart
-
-# Clone and install qwen_tts from HuggingFace space
-RUN git clone --depth 1 https://huggingface.co/spaces/Qwen/Qwen3-TTS /tmp/qwen3-tts && \
-    pip3 install --no-cache-dir /tmp/qwen3-tts && \
-    rm -rf /tmp/qwen3-tts
 
 COPY server.py /app/server.py
 
