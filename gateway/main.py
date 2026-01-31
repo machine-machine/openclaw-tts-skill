@@ -87,7 +87,8 @@ async def synthesize_openai(text: str, voice: str, format: str, language: str = 
     payload = {"text": text, "voice": voice, "format": format, "language": language}
     if instruct:
         payload["instruct"] = instruct
-        logger.info(f"Using style instruction: {instruct[:50]}...")
+    
+    logger.info(f"Sending to backend: format={format}, voice={voice}, text_len={len(text)}")
     
     resp = await client.post(
         f"{TTS_BASE_URL}/v1/audio/speech",
@@ -113,6 +114,7 @@ async def synthesize(text: str, voice: str = "default", format: str = "wav", lan
 
 @app.get("/health")
 async def health():
+    backend_health = None
     try:
         if TTS_TYPE == "coqui":
             resp = await client.get(f"{TTS_BASE_URL}/", timeout=5.0)
@@ -120,6 +122,8 @@ async def health():
         else:
             resp = await client.get(f"{TTS_BASE_URL}/health", timeout=5.0)
             backend_ok = resp.status_code == 200
+            if backend_ok:
+                backend_health = resp.json()
     except:
         backend_ok = False
     
@@ -127,7 +131,9 @@ async def health():
         "status": "healthy",
         "backend": TTS_BASE_URL,
         "backend_type": TTS_TYPE,
-        "backend_status": "ok" if backend_ok else "unavailable"
+        "backend_status": "ok" if backend_ok else "unavailable",
+        "backend_health": backend_health,
+        "gateway_version": "1.1.0"
     }
 
 @app.post("/v1/audio/speech")
