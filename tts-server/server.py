@@ -190,18 +190,28 @@ async def get_speakers():
             "default_speaker": DEFAULT_SPEAKER
         }
     elif MODEL_TYPE == "base":
-        # List available reference audio files
+        # List available reference audio files with transcript status
         voices = []
         if os.path.isdir(REFERENCE_AUDIO_DIR):
+            seen = set()
             for f in os.listdir(REFERENCE_AUDIO_DIR):
                 if f.endswith((".wav", ".mp3", ".flac", ".ogg")):
-                    voices.append(os.path.splitext(f)[0])
+                    name = os.path.splitext(f)[0]
+                    if name not in seen:
+                        seen.add(name)
+                        txt_path = os.path.join(REFERENCE_AUDIO_DIR, f"{name}.txt")
+                        has_transcript = os.path.isfile(txt_path)
+                        voices.append({
+                            "name": name,
+                            "has_transcript": has_transcript,
+                            "quality": "full" if has_transcript else "x_vector_only"
+                        })
         return {
             "model_type": MODEL_TYPE,
             "voices": voices,
             "reference_dir": REFERENCE_AUDIO_DIR,
-            "default_voice": DEFAULT_REFERENCE_AUDIO or (voices[0] if voices else None),
-            "note": "Upload reference audio to add voices"
+            "default_voice": DEFAULT_REFERENCE_AUDIO or (voices[0]["name"] if voices else None),
+            "note": "Upload reference audio + transcript for best quality voice cloning"
         }
     else:
         return {
@@ -209,12 +219,17 @@ async def get_speakers():
             "note": "VoiceDesign uses instruct parameter to create voices"
         }
 
+class VoiceUploadRequest(BaseModel):
+    """Voice upload with transcript for cloning"""
+    ref_text: str = Field(..., description="Transcript of the reference audio")
+
 @app.post("/voices/upload", tags=["Voice Cloning"])
 async def upload_voice(
     file: UploadFile = File(...),
-    name: str = Form(..., description="Voice name (alphanumeric, no spaces)")
+    name: str = Form(..., description="Voice name (alphanumeric, no spaces)"),
+    ref_text: str = Form(..., description="Transcript of the reference audio")
 ):
-    """Upload reference audio for voice cloning (base model)"""
+    """Upload reference audio + transcript for voice cloning (base model)"""
     if MODEL_TYPE != "base":
         raise HTTPException(status_code=400, detail="Voice upload only available for base model")
     
@@ -231,18 +246,26 @@ async def upload_voice(
     
     # Save file
     os.makedirs(REFERENCE_AUDIO_DIR, exist_ok=True)
-    file_path = os.path.join(REFERENCE_AUDIO_DIR, f"{safe_name}{ext}")
+    audio_path = os.path.join(REFERENCE_AUDIO_DIR, f"{safe_name}{ext}")
+    text_path = os.path.join(REFERENCE_AUDIO_DIR, f"{safe_name}.txt")
     
     try:
-        async with aiofiles.open(file_path, "wb") as f:
+        # Save audio file
+        async with aiofiles.open(audio_path, "wb") as f:
             content = await file.read()
             await f.write(content)
         
-        logger.info(f"Uploaded voice '{safe_name}' ({len(content)} bytes)")
+        # Save transcript
+        async with aiofiles.open(text_path, "w") as f:
+            await f.write(ref_text.strip())
+        
+        logger.info(f"Uploaded voice '{safe_name}' ({len(content)} bytes) with transcript")
         return {
             "ok": True,
             "voice_name": safe_name,
-            "file_path": file_path,
+            "audio_path": audio_path,
+            "text_path": text_path,
+            "ref_text": ref_text.strip(),
             "size_bytes": len(content)
         }
     except Exception as e:
@@ -270,15 +293,51 @@ async def test_tts():
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     try:
-        with torch.no_grad():
-            wavs, sr = custom_voice_model.generate_custom_voice(
-                text="Hello! I am m2, your AI assistant with a voice.",
-                language="english",
-                speaker=DEFAULT_SPEAKER,
-                instruct="Speak in a friendly and warm tone",
-                non_streaming_mode=True,
-                max_new_tokens=512,
-            )
+        test_text = "Hello! I am m2, your AI assistant with a voice."
+        
+        if MODEL_TYPE == "base":
+            # Use first available voice or fail gracefully
+            ref_audio, ref_text = get_voice_clone_data(DEFAULT_REFERENCE_AUDIO or "default")
+            if not ref_audio:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No reference audio available. Upload one to {REFERENCE_AUDIO_DIR}/"
+                )
+            
+            with torch.no_grad():
+                if ref_text:
+                    wavs, sr = custom_voice_model.generate_voice_clone(
+                        text=test_text,
+                        language="English",
+                        ref_audio=ref_audio,
+                        ref_text=ref_text,
+                    )
+                else:
+                    wavs, sr = custom_voice_model.generate_voice_clone(
+                        text=test_text,
+                        language="English",
+                        ref_audio=ref_audio,
+                        x_vector_only_mode=True,
+                    )
+        
+        elif MODEL_TYPE == "customvoice":
+            with torch.no_grad():
+                wavs, sr = custom_voice_model.generate_custom_voice(
+                    text=test_text,
+                    language="english",
+                    speaker=DEFAULT_SPEAKER,
+                    instruct="Speak in a friendly and warm tone",
+                    non_streaming_mode=True,
+                    max_new_tokens=512,
+                )
+        
+        else:
+            with torch.no_grad():
+                wavs, sr = custom_voice_model.generate_voice_design(
+                    text=test_text,
+                    language="english",
+                    instruct="A warm, friendly voice",
+                )
         
         audio_bytes = audio_to_bytes(wavs[0], sr, "wav")
         return StreamingResponse(
@@ -286,26 +345,49 @@ async def test_tts():
             media_type="audio/wav",
             headers={"Content-Disposition": "attachment; filename=test.wav"}
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Test TTS error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-def get_reference_audio_path(voice: str) -> Optional[str]:
-    """Get reference audio path for voice cloning"""
+def get_voice_clone_data(voice: str) -> tuple[Optional[str], Optional[str]]:
+    """Get reference audio path and transcript for voice cloning.
+    Returns (audio_path, ref_text) tuple.
+    """
     if not voice:
-        return DEFAULT_REFERENCE_AUDIO if DEFAULT_REFERENCE_AUDIO else None
+        voice = DEFAULT_REFERENCE_AUDIO
     
-    # Check if voice is a path to audio file
+    if not voice:
+        return None, None
+    
+    audio_path = None
+    ref_text = None
+    
+    # Check if voice is a direct path to audio file
     if os.path.isfile(voice):
-        return voice
+        audio_path = voice
+        # Look for .txt alongside it
+        base = os.path.splitext(voice)[0]
+        txt_path = f"{base}.txt"
+        if os.path.isfile(txt_path):
+            with open(txt_path, "r") as f:
+                ref_text = f.read().strip()
+    else:
+        # Check in reference audio directory
+        for ext in [".wav", ".mp3", ".flac", ".ogg"]:
+            path = os.path.join(REFERENCE_AUDIO_DIR, f"{voice}{ext}")
+            if os.path.isfile(path):
+                audio_path = path
+                break
+        
+        # Look for transcript
+        txt_path = os.path.join(REFERENCE_AUDIO_DIR, f"{voice}.txt")
+        if os.path.isfile(txt_path):
+            with open(txt_path, "r") as f:
+                ref_text = f.read().strip()
     
-    # Check in reference audio directory
-    for ext in [".wav", ".mp3", ".flac", ".ogg"]:
-        path = os.path.join(REFERENCE_AUDIO_DIR, f"{voice}{ext}")
-        if os.path.isfile(path):
-            return path
-    
-    return None
+    return audio_path, ref_text
 
 @app.post("/v1/audio/speech", tags=["TTS"])
 async def openai_speech(request: TTSRequest):
@@ -317,22 +399,38 @@ async def openai_speech(request: TTSRequest):
         start = time.time()
         
         if MODEL_TYPE == "base":
-            # Base model: use voice cloning with reference audio
-            ref_audio = get_reference_audio_path(request.voice)
+            # Base model: use voice cloning with reference audio + transcript
+            ref_audio, ref_text = get_voice_clone_data(request.voice)
             if not ref_audio:
                 raise HTTPException(
                     status_code=400,
                     detail=f"No reference audio found for voice '{request.voice}'. Upload to {REFERENCE_AUDIO_DIR}/"
                 )
             
-            logger.info(f"Using reference audio: {ref_audio}")
+            # Determine language
+            lang = request.language.lower()
+            if lang == "auto":
+                lang = "english"  # Default to English for auto
+            
+            logger.info(f"Voice cloning: ref_audio={ref_audio}, ref_text={'yes' if ref_text else 'no (x_vector_only)'}, lang={lang}")
+            
             with torch.no_grad():
-                wavs, sr = custom_voice_model.generate(
-                    text=request.text.strip(),
-                    speaker=ref_audio,
-                    non_streaming_mode=True,
-                    max_new_tokens=2048,
-                )
+                if ref_text:
+                    # Full voice cloning with transcript (best quality)
+                    wavs, sr = custom_voice_model.generate_voice_clone(
+                        text=request.text.strip(),
+                        language=lang.capitalize(),
+                        ref_audio=ref_audio,
+                        ref_text=ref_text,
+                    )
+                else:
+                    # x_vector_only mode (no transcript, reduced quality)
+                    wavs, sr = custom_voice_model.generate_voice_clone(
+                        text=request.text.strip(),
+                        language=lang.capitalize(),
+                        ref_audio=ref_audio,
+                        x_vector_only_mode=True,
+                    )
         
         elif MODEL_TYPE == "customvoice":
             # CustomVoice model: use preset speakers
