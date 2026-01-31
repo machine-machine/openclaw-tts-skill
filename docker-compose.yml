@@ -1,10 +1,9 @@
 version: "3.9"
 
 # m2 Voice - Qwen3-TTS
-# Model downloaded at runtime to volume (not in build)
 
 services:
-  qwen-tts:
+  qwen_tts:
     build: ./tts-server
     container_name: m2-qwen-tts
     restart: unless-stopped
@@ -14,7 +13,6 @@ services:
       - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN}
       - HF_HOME=/models
       - TRANSFORMERS_CACHE=/models
-      - MODEL_ID=Qwen/Qwen3-TTS
     deploy:
       resources:
         reservations:
@@ -31,19 +29,19 @@ services:
       retries: 10
       start_period: 300s
 
-  speech-gateway:
+  speech_gateway:
     build: ./gateway
     container_name: m2-voice-gateway
     restart: unless-stopped
     environment:
-      - TTS_BASE_URL=http://qwen-tts:8000
+      - TTS_BASE_URL=http://qwen_tts:8000
       - TTS_TYPE=openai
       - PUBLIC_URL=https://voice.machinemachine.ai
       - STORAGE_DIR=/app/output
     volumes:
-      - tts-output:/app/output
+      - tts_output:/app/output
     depends_on:
-      - qwen-tts
+      - qwen_tts
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:80/health"]
       interval: 30s
@@ -53,4 +51,4 @@ services:
 
 volumes:
   models:
-  tts-output:
+  tts_output:
