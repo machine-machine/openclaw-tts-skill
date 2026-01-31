@@ -176,7 +176,9 @@ def audio_to_bytes(wav: np.ndarray, sr: int, format: str = "wav") -> bytes:
         if fmt == "mp3":
             cmd = ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libmp3lame", "-q:a", "2", out_path]
         elif fmt == "opus":
-            cmd = ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libopus", "-b:a", "64k", out_path]
+            # Opus needs ogg container - output as .ogg with opus codec
+            out_path = wav_path.replace(".wav", ".ogg")
+            cmd = ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libopus", "-b:a", "64k", "-vbr", "on", out_path]
         elif fmt == "ogg":
             cmd = ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libvorbis", "-q:a", "4", out_path]
         else:
