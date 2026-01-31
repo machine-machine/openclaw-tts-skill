@@ -28,6 +28,8 @@ services:
       timeout: 10s
       retries: 10
       start_period: 300s
+    networks:
+      - internal
 
   speech_gateway:
     build: ./gateway
@@ -48,7 +50,15 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    networks:
+      - coolify
+      - internal
 
 volumes:
   models:
   tts_output:
+
+networks:
+  coolify:
+    external: true
+  internal:
