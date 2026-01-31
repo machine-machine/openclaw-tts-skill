@@ -4,11 +4,12 @@ FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 
-# Install ffmpeg for audio format conversion (mp3, opus, ogg)
+# Install ffmpeg with opus/mp3/vorbis codecs
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg libopus0 libmp3lame0 libvorbis0a && \
     rm -rf /var/lib/apt/lists/* && \
-    ffmpeg -version | head -1
+    echo "=== FFmpeg codecs ===" && \
+    ffmpeg -codecs 2>/dev/null | grep -E "opus|mp3|vorbis" || true
 
 # Only install qwen-tts and its deps (torch already included)
 RUN pip install --no-cache-dir \

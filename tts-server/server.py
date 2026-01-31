@@ -230,13 +230,23 @@ async def root():
 
 @app.get("/health", tags=["System"])
 async def health():
-    # Check ffmpeg availability
+    # Check ffmpeg and codec availability
     import subprocess
+    ffmpeg_ok = False
+    codecs = {}
     try:
         result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
         ffmpeg_ok = result.returncode == 0
-    except:
-        ffmpeg_ok = False
+        # Check for specific codecs
+        result = subprocess.run(["ffmpeg", "-codecs"], capture_output=True, timeout=5)
+        codec_output = result.stdout.decode()
+        codecs = {
+            "libopus": "libopus" in codec_output,
+            "libmp3lame": "libmp3lame" in codec_output,
+            "libvorbis": "libvorbis" in codec_output,
+        }
+    except Exception as e:
+        logger.warning(f"FFmpeg check failed: {e}")
     
     return JSONResponse({
         "status": "ok" if custom_voice_model else "loading",
@@ -248,7 +258,8 @@ async def health():
         "cuda_available": torch.cuda.is_available(),
         "speakers_count": len(SPEAKERS) if MODEL_TYPE == "customvoice" else 0,
         "ffmpeg": ffmpeg_ok,
-        "version": "1.2.0-opus"
+        "codecs": codecs,
+        "version": "1.3.0-opus-fix"
     })
 
 @app.get("/speakers", tags=["Info"])
