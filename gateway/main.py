@@ -34,7 +34,7 @@ class SpeechRequest(BaseModel):
     # Accept both 'text' (our format) and 'input' (OpenAI format)
     text: str = Field(default=None, min_length=1, max_length=5000)
     input: str = Field(default=None, min_length=1, max_length=5000)  # OpenAI compat
-    voice: str = Field(default="vivian")
+    voice: str = Field(default="v")
     format: Literal["mp3", "wav", "ogg"] = Field(default="wav")
     response_format: str = Field(default=None)  # OpenAI compat (maps to format)
     model: str = Field(default=None)  # OpenAI compat (ignored)
