@@ -39,6 +39,10 @@ class SpeechRequest(BaseModel):
     response_format: str = Field(default=None)  # OpenAI compat (maps to format)
     model: str = Field(default=None)  # OpenAI compat (ignored)
     stream: bool = Field(default=False)
+    # Style/instruction support
+    language: str = Field(default="auto")
+    instruct: str = Field(default=None, description="Voice style instruction")
+    style: str = Field(default=None, description="Alias for instruct")
     
     def get_text(self) -> str:
         """Get text from either field"""
@@ -49,6 +53,10 @@ class SpeechRequest(BaseModel):
         if self.response_format:
             return self.response_format.replace("audio/", "")
         return self.format
+    
+    def get_instruct(self) -> str:
+        """Get style instruction from either field"""
+        return self.instruct or self.style
 
 class SpeakFileRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000)
@@ -72,22 +80,27 @@ async def synthesize_coqui(text: str, speaker_id: str = None) -> bytes:
         raise HTTPException(status_code=resp.status_code, detail=f"TTS error: {resp.text}")
     return resp.content
 
-async def synthesize_openai(text: str, voice: str, format: str) -> bytes:
-    """Call OpenAI-compatible TTS API"""
+async def synthesize_openai(text: str, voice: str, format: str, language: str = "auto", instruct: str = None) -> bytes:
+    """Call OpenAI-compatible TTS API with style instructions"""
+    payload = {"text": text, "voice": voice, "format": format, "language": language}
+    if instruct:
+        payload["instruct"] = instruct
+        logger.info(f"Using style instruction: {instruct[:50]}...")
+    
     resp = await client.post(
         f"{TTS_BASE_URL}/v1/audio/speech",
-        json={"text": text, "voice": voice, "format": format}
+        json=payload
     )
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=f"TTS error: {resp.text}")
     return resp.content
 
-async def synthesize(text: str, voice: str = "default", format: str = "wav") -> bytes:
+async def synthesize(text: str, voice: str = "default", format: str = "wav", language: str = "auto", instruct: str = None) -> bytes:
     """Route to appropriate TTS backend"""
     if TTS_TYPE == "coqui":
         return await synthesize_coqui(text, voice if voice != "default" else None)
     elif TTS_TYPE == "openai":
-        return await synthesize_openai(text, voice, format)
+        return await synthesize_openai(text, voice, format, language, instruct)
     else:
         raise HTTPException(status_code=500, detail=f"Unknown TTS type: {TTS_TYPE}")
 
@@ -112,16 +125,17 @@ async def health():
 
 @app.post("/v1/audio/speech")
 async def openai_speech(request: SpeechRequest):
-    """OpenAI-compatible TTS endpoint"""
+    """OpenAI-compatible TTS endpoint with style instructions"""
     text = request.get_text()
     if not text:
         raise HTTPException(status_code=422, detail="Either 'text' or 'input' field required")
     
     fmt = request.get_format()
-    logger.info(f"TTS request: voice={request.voice}, format={fmt}, text_len={len(text)}")
+    instruct = request.get_instruct()
+    logger.info(f"TTS request: voice={request.voice}, format={fmt}, lang={request.language}, instruct={bool(instruct)}, text_len={len(text)}")
     
     try:
-        audio = await synthesize(text, request.voice, fmt)
+        audio = await synthesize(text, request.voice, fmt, request.language, instruct)
         return Response(
             content=audio,
             media_type=f"audio/{fmt}",
