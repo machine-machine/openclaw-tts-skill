@@ -1,25 +1,30 @@
-# Minimal Qwen3-TTS Server
+# Qwen3-TTS Server
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
 
 WORKDIR /app
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip curl libsndfile1 \
+    python3 python3-pip git curl libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 # PyTorch with CUDA
-RUN pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
+RUN pip3 install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Other Python deps
+# Qwen TTS from HuggingFace space
 RUN pip3 install --no-cache-dir \
     transformers \
     accelerate \
     soundfile \
     scipy \
+    numpy \
     fastapi \
     "uvicorn[standard]" \
-    huggingface_hub
+    huggingface_hub \
+    python-multipart
+
+# Install qwen_tts package from the space
+RUN pip3 install --no-cache-dir git+https://huggingface.co/spaces/Qwen/Qwen3-TTS
 
 COPY server.py /app/server.py
 
