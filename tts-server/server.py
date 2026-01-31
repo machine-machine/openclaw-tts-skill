@@ -232,18 +232,21 @@ async def root():
 async def health():
     # Check ffmpeg and codec availability
     import subprocess
+    import shutil
     ffmpeg_ok = False
     codecs = {}
+    ffmpeg_path = shutil.which("ffmpeg") or "ffmpeg"
     try:
-        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        result = subprocess.run([ffmpeg_path, "-version"], capture_output=True, timeout=5)
         ffmpeg_ok = result.returncode == 0
-        # Check for specific codecs
-        result = subprocess.run(["ffmpeg", "-codecs"], capture_output=True, timeout=5)
-        codec_output = result.stdout.decode()
+        # Check for specific codecs (use -encoders for encoder availability)
+        result = subprocess.run([ffmpeg_path, "-encoders"], capture_output=True, timeout=5)
+        encoder_output = result.stdout.decode()
         codecs = {
-            "libopus": "libopus" in codec_output,
-            "libmp3lame": "libmp3lame" in codec_output,
-            "libvorbis": "libvorbis" in codec_output,
+            "libopus": "libopus" in encoder_output,
+            "libmp3lame": "libmp3lame" in encoder_output,
+            "libvorbis": "libvorbis" in encoder_output,
+            "ffmpeg_path": ffmpeg_path,
         }
     except Exception as e:
         logger.warning(f"FFmpeg check failed: {e}")
@@ -259,7 +262,7 @@ async def health():
         "speakers_count": len(SPEAKERS) if MODEL_TYPE == "customvoice" else 0,
         "ffmpeg": ffmpeg_ok,
         "codecs": codecs,
-        "version": "1.3.0-opus-fix"
+        "version": "1.4.0-static-ffmpeg"
     })
 
 @app.get("/speakers", tags=["Info"])
