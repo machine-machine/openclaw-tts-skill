@@ -13,7 +13,12 @@ services:
       - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN}
       - HF_HOME=/models
       - TRANSFORMERS_CACHE=/models
-      - LOCAL_MODEL_PATH=/models/qwen-tts-1.7b-customvoice
+      # Model configuration (set in Coolify)
+      - LOCAL_MODEL_PATH=${LOCAL_MODEL_PATH:-/models/qwen-tts-1.7b-base}
+      - MODEL_TYPE=${MODEL_TYPE:-base}
+      - REFERENCE_AUDIO_DIR=${REFERENCE_AUDIO_DIR:-/models/reference_audio}
+      - DEFAULT_REFERENCE_AUDIO=${DEFAULT_REFERENCE_AUDIO:-}
+      - DEFAULT_SPEAKER=${DEFAULT_SPEAKER:-serena}
     deploy:
       resources:
         reservations:
