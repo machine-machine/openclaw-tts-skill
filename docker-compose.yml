@@ -1,7 +1,7 @@
 version: "3.9"
 
 # m2 Voice - Qwen3-TTS
-# Simplified for Coolify
+# speech_gateway must be on coolify network for Traefik routing
 
 services:
   qwen_tts:
@@ -28,6 +28,8 @@ services:
       timeout: 10s
       retries: 10
       start_period: 300s
+    networks:
+      - default
 
   speech_gateway:
     build: ./gateway
@@ -35,7 +37,7 @@ services:
     environment:
       - TTS_BASE_URL=http://qwen_tts:8000
       - TTS_TYPE=openai
-      - PUBLIC_URL=https://voice.machinemachine.ai
+      - PUBLIC_URL=http://voice.machinemachine.ai
       - STORAGE_DIR=/app/output
     volumes:
       - tts_output:/app/output
@@ -47,7 +49,15 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    networks:
+      - default
+      - coolify
 
 volumes:
   models:
   tts_output:
+
+networks:
+  coolify:
+    external: true
+  default:
