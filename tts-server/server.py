@@ -1,5 +1,5 @@
 """
-Qwen3-TTS Server - FastAPI wrapper for Qwen/Qwen3-TTS
+Qwen3-TTS Server - Model downloaded at runtime to /models volume
 """
 import os
 import io
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 MODEL_ID = os.getenv("MODEL_ID", "Qwen/Qwen3-TTS")
 HF_TOKEN = os.getenv("HF_TOKEN", os.getenv("HUGGING_FACE_HUB_TOKEN"))
+MODELS_DIR = os.getenv("HF_HOME", "/models")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 SAMPLE_RATE = 24000
@@ -24,53 +25,65 @@ SAMPLE_RATE = 24000
 model = None
 processor = None
 
+def download_model_if_needed():
+    """Download model to /models on first run"""
+    logger.info(f"Checking for model in {MODELS_DIR}...")
+    
+    if HF_TOKEN:
+        from huggingface_hub import login
+        login(token=HF_TOKEN)
+        logger.info("Logged into Hugging Face")
+    
+    # Model will be cached in HF_HOME=/models
+    os.makedirs(MODELS_DIR, exist_ok=True)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global model, processor
     
-    logger.info(f"Loading {MODEL_ID} on {DEVICE} with {DTYPE}...")
+    download_model_if_needed()
+    
+    logger.info(f"Loading {MODEL_ID} on {DEVICE}...")
     
     try:
-        # Login to HF if token provided
-        if HF_TOKEN:
-            from huggingface_hub import login
-            login(token=HF_TOKEN)
-            logger.info("Logged into Hugging Face")
+        from transformers import AutoProcessor, AutoModelForCausalLM
         
-        # Try loading Qwen3-TTS
-        # The model architecture may vary - try different loaders
-        from transformers import AutoModel, AutoProcessor, AutoTokenizer
-        
-        try:
-            # Try as speech model
-            processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
-            model = AutoModel.from_pretrained(
-                MODEL_ID,
-                torch_dtype=DTYPE,
-                device_map="auto" if DEVICE == "cuda" else None,
-                trust_remote_code=True
-            )
-        except Exception as e:
-            logger.warning(f"AutoModel failed: {e}, trying alternative...")
-            # Fallback: try with specific class if available
-            from transformers import pipeline
-            model = pipeline("text-to-speech", model=MODEL_ID, device=0 if DEVICE == "cuda" else -1)
-            processor = None
-        
-        if hasattr(model, 'eval'):
-            model.eval()
-        
-        logger.info(f"Model loaded successfully on {DEVICE}")
+        # Try loading - will download if not in cache
+        processor = AutoProcessor.from_pretrained(
+            MODEL_ID, 
+            trust_remote_code=True,
+            cache_dir=MODELS_DIR
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            torch_dtype=DTYPE,
+            device_map="auto" if DEVICE == "cuda" else None,
+            trust_remote_code=True,
+            cache_dir=MODELS_DIR
+        )
+        model.eval()
+        logger.info(f"Model loaded on {DEVICE}")
         
     except Exception as e:
-        logger.error(f"Failed to load model: {e}")
-        raise
+        logger.error(f"Model load failed: {e}")
+        logger.info("Trying pipeline fallback...")
+        try:
+            from transformers import pipeline
+            model = pipeline(
+                "text-to-speech", 
+                model=MODEL_ID, 
+                device=0 if DEVICE == "cuda" else -1,
+                model_kwargs={"cache_dir": MODELS_DIR}
+            )
+            processor = None
+            logger.info("Pipeline loaded")
+        except Exception as e2:
+            logger.error(f"Pipeline also failed: {e2}")
+            # Continue anyway - will fail on synthesis
     
     yield
     
     logger.info("Shutting down...")
-    del model
-    del processor
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
 
@@ -91,18 +104,12 @@ def synthesize(text: str, voice: str = "default") -> bytes:
     try:
         with torch.no_grad():
             if processor is not None:
-                # Using processor + model
                 inputs = processor(text=text, return_tensors="pt")
                 if DEVICE == "cuda":
                     inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
                 
-                # Generate audio
-                if hasattr(model, 'generate'):
-                    output = model.generate(**inputs)
-                else:
-                    output = model(**inputs)
+                output = model.generate(**inputs) if hasattr(model, 'generate') else model(**inputs)
                 
-                # Extract audio tensor
                 if hasattr(output, 'audio'):
                     audio = output.audio
                 elif hasattr(output, 'waveform'):
@@ -114,13 +121,11 @@ def synthesize(text: str, voice: str = "default") -> bytes:
                 
                 audio_np = audio.cpu().numpy().squeeze()
             else:
-                # Using pipeline
                 result = model(text)
                 audio_np = result["audio"]
                 global SAMPLE_RATE
                 SAMPLE_RATE = result.get("sampling_rate", SAMPLE_RATE)
         
-        # Convert to WAV bytes
         buffer = io.BytesIO()
         sf.write(buffer, audio_np, SAMPLE_RATE, format='WAV')
         buffer.seek(0)
@@ -128,7 +133,7 @@ def synthesize(text: str, voice: str = "default") -> bytes:
         
     except torch.cuda.OutOfMemoryError:
         torch.cuda.empty_cache()
-        raise HTTPException(status_code=507, detail="GPU out of memory")
+        raise HTTPException(status_code=507, detail="GPU OOM")
     except Exception as e:
         logger.error(f"Synthesis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -136,33 +141,24 @@ def synthesize(text: str, voice: str = "default") -> bytes:
 @app.get("/health")
 async def health():
     return {
-        "status": "ok",
+        "status": "ok" if model else "loading",
         "model": MODEL_ID,
         "device": DEVICE,
-        "cuda_available": torch.cuda.is_available(),
-        "model_loaded": model is not None
+        "cuda": torch.cuda.is_available(),
+        "models_dir": MODELS_DIR
     }
 
 @app.get("/")
 async def root():
-    return {"message": "Qwen3-TTS Server", "status": "running"}
+    return {"service": "Qwen3-TTS", "status": "running"}
 
 @app.post("/v1/audio/speech")
 async def openai_speech(request: TTSRequest):
-    """OpenAI-compatible TTS endpoint"""
     audio = synthesize(request.text, request.voice)
-    return Response(
-        content=audio,
-        media_type="audio/wav",
-        headers={"Content-Disposition": f"attachment; filename=speech.wav"}
-    )
+    return Response(content=audio, media_type="audio/wav")
 
 @app.get("/api/tts")
-async def coqui_compatible(
-    text: str = Query(..., min_length=1, max_length=5000),
-    speaker_id: Optional[str] = None
-):
-    """Coqui-compatible TTS endpoint"""
+async def coqui_compat(text: str = Query(...), speaker_id: Optional[str] = None):
     audio = synthesize(text, speaker_id or "default")
     return Response(content=audio, media_type="audio/wav")
 

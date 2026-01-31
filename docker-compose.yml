@@ -1,24 +1,19 @@
 version: "3.9"
 
-# m2 Voice Stack - Qwen3-TTS with RTX 3090
-# Deploy via Coolify to voice.machinemachine.ai
+# m2 Voice - Qwen3-TTS
+# Model downloaded at runtime to volume (not in build)
 
 services:
-  # Qwen3-TTS Backend (GPU)
   qwen-tts:
-    build:
-      context: ./tts-server
-      dockerfile: Dockerfile
-      args:
-        HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN}
+    build: ./tts-server
     container_name: m2-qwen-tts
     restart: unless-stopped
-    shm_size: "8g"
+    shm_size: "4g"
     environment:
-      - TZ=UTC
       - CUDA_VISIBLE_DEVICES=1
       - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - HF_HOME=/models
+      - TRANSFORMERS_CACHE=/models
       - MODEL_ID=Qwen/Qwen3-TTS
     deploy:
       resources:
@@ -28,19 +23,16 @@ services:
               device_ids: ["1"]
               capabilities: [gpu]
     volumes:
-      - hf-cache:/root/.cache/huggingface
+      - models:/models
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 180s
+      retries: 10
+      start_period: 300s
 
-  # Gateway API
   speech-gateway:
-    build:
-      context: ./gateway
-      dockerfile: Dockerfile
+    build: ./gateway
     container_name: m2-voice-gateway
     restart: unless-stopped
     environment:
@@ -60,5 +52,5 @@ services:
       start_period: 30s
 
 volumes:
-  hf-cache:
+  models:
   tts-output:

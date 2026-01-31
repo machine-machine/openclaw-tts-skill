@@ -1,31 +1,26 @@
-# Qwen3-TTS Server with GPU support
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+# Minimal Qwen3-TTS Server
+# Model downloaded at runtime, not build time
+FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
 
 WORKDIR /app
 
-# Install system deps
+# Minimal deps only
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ffmpeg libsndfile1 \
+    python3 python3-pip curl libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
-RUN pip install --no-cache-dir \
-    transformers>=4.45.0 \
-    accelerate \
-    soundfile \
-    scipy \
-    fastapi \
-    uvicorn[standard] \
-    huggingface_hub
+# Python packages (no model download here)
+RUN pip3 install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cu121 \
+    transformers accelerate soundfile scipy \
+    fastapi uvicorn[standard] huggingface_hub
 
-# Pre-download model (will use HF token from env)
-ARG HF_TOKEN
-ENV HF_TOKEN=${HF_TOKEN}
-RUN python -c "from huggingface_hub import login; login(token='${HF_TOKEN}')" 2>/dev/null || true
-
-# Copy server
 COPY server.py /app/server.py
+
+# Model will be in /models volume, downloaded at runtime
+ENV HF_HOME=/models
+ENV TRANSFORMERS_CACHE=/models
 
 EXPOSE 8000
 
-CMD ["python", "server.py"]
+CMD ["python3", "server.py"]
