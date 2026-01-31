@@ -142,13 +142,73 @@ class TTSRequest(BaseModel):
     voice: str = Field(default=DEFAULT_SPEAKER, description="Speaker name")
     language: str = Field(default="auto")
     instruct: Optional[str] = Field(default=None, description="Style instruction")
-    format: Literal["wav", "mp3", "ogg"] = Field(default="wav")
+    format: Literal["wav", "mp3", "ogg", "opus"] = Field(default="wav")
+    response_format: Optional[str] = Field(default=None, description="Alias for format (OpenAI compat)")
 
 def audio_to_bytes(wav: np.ndarray, sr: int, format: str = "wav") -> bytes:
-    buffer = io.BytesIO()
-    sf.write(buffer, wav, sr, format=format.upper() if format != "mp3" else "WAV")
-    buffer.seek(0)
-    return buffer.read()
+    """Convert numpy audio to bytes in requested format.
+    
+    soundfile supports: wav, flac, ogg (vorbis)
+    For mp3/opus: we write wav first, then convert with ffmpeg
+    """
+    import subprocess
+    
+    # Normalize format
+    fmt = format.lower()
+    
+    # Formats soundfile can handle directly
+    if fmt in ("wav", "flac"):
+        buffer = io.BytesIO()
+        sf.write(buffer, wav, sr, format=fmt.upper())
+        buffer.seek(0)
+        return buffer.read()
+    
+    # For mp3, opus, ogg - use ffmpeg conversion
+    # First write WAV to temp file
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_file:
+        wav_path = wav_file.name
+        sf.write(wav_path, wav, sr, format="WAV")
+    
+    try:
+        out_path = wav_path.replace(".wav", f".{fmt}")
+        
+        # Build ffmpeg command based on format
+        if fmt == "mp3":
+            cmd = ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libmp3lame", "-q:a", "2", out_path]
+        elif fmt == "opus":
+            cmd = ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libopus", "-b:a", "64k", out_path]
+        elif fmt == "ogg":
+            cmd = ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libvorbis", "-q:a", "4", out_path]
+        else:
+            # Fallback to wav
+            with open(wav_path, "rb") as f:
+                return f.read()
+        
+        # Run ffmpeg
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            logger.warning(f"ffmpeg conversion failed: {result.stderr.decode()}")
+            # Fallback to wav
+            with open(wav_path, "rb") as f:
+                return f.read()
+        
+        # Read converted file
+        with open(out_path, "rb") as f:
+            data = f.read()
+        
+        # Cleanup output file
+        try:
+            os.remove(out_path)
+        except:
+            pass
+        
+        return data
+    finally:
+        # Cleanup wav temp file
+        try:
+            os.remove(wav_path)
+        except:
+            pass
 
 # Endpoints
 @app.get("/", tags=["General"])
@@ -467,12 +527,26 @@ async def openai_speech(request: TTSRequest):
         gen_time = time.time() - start
         logger.info(f"Generated {len(request.text)} chars in {gen_time:.2f}s (model={MODEL_TYPE})")
         
-        audio_bytes = audio_to_bytes(wavs[0], sr, request.format)
+        # Handle response_format alias (OpenAI compat)
+        output_format = (request.response_format or request.format or "wav").lower()
+        
+        audio_bytes = audio_to_bytes(wavs[0], sr, output_format)
+        
+        # Correct media types
+        media_types = {
+            "wav": "audio/wav",
+            "mp3": "audio/mpeg",
+            "ogg": "audio/ogg",
+            "opus": "audio/ogg",  # opus is usually in ogg container
+            "flac": "audio/flac",
+        }
+        media_type = media_types.get(output_format, f"audio/{output_format}")
+        
         return Response(
             content=audio_bytes,
-            media_type=f"audio/{request.format}",
+            media_type=media_type,
             headers={
-                "Content-Disposition": f"attachment; filename=speech.{request.format}",
+                "Content-Disposition": f"attachment; filename=speech.{output_format}",
                 "X-Generation-Time": f"{gen_time:.2f}s",
                 "X-Model-Type": MODEL_TYPE
             }
