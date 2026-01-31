@@ -4,13 +4,17 @@ FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 
-# Install ffmpeg with full codec support
-# libavcodec-extra includes non-free codecs like libopus, libmp3lame, libvorbis
-RUN apt-get update && \
-    apt-get install -y ffmpeg libavcodec-extra58 && \
+# Download static ffmpeg with all codecs (includes libopus, libmp3lame, libvorbis)
+RUN apt-get update && apt-get install -y wget xz-utils && \
+    wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+    tar xf ffmpeg-release-amd64-static.tar.xz && \
+    mv ffmpeg-*-static/ffmpeg /usr/local/bin/ && \
+    mv ffmpeg-*-static/ffprobe /usr/local/bin/ && \
+    rm -rf ffmpeg-* && \
+    apt-get remove -y wget xz-utils && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* && \
     echo "=== FFmpeg encoders ===" && \
-    ffmpeg -encoders 2>/dev/null | grep -E "libopus|libmp3lame|libvorbis" || echo "Warning: Some codecs missing"
+    ffmpeg -encoders 2>/dev/null | grep -E "libopus|libmp3lame|libvorbis"
 
 # Install qwen-tts and deps (torch already included)
 # flash-attn is optional but improves performance - may fail on some systems
