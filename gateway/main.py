@@ -4,7 +4,7 @@ import logging
 import io
 import aiofiles
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -178,6 +178,35 @@ async def get_file(filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     
     return FileResponse(file_path)
+
+@app.post("/voices/upload")
+async def upload_voice(file: bytes = None, name: str = None):
+    """Proxy voice upload to backend - use multipart form"""
+    from fastapi import UploadFile, File, Form, Request
+    raise HTTPException(status_code=400, detail="Use form-data with 'file' and 'name' fields")
+
+@app.post("/voices")
+async def upload_voice_form(request: Request):
+    """Proxy voice upload to backend via form-data"""
+    # Forward the raw request body to backend
+    body = await request.body()
+    headers = {"content-type": request.headers.get("content-type", "")}
+    
+    async with httpx.AsyncClient() as c:
+        resp = await c.post(
+            f"{TTS_BASE_URL}/voices/upload",
+            content=body,
+            headers=headers,
+            timeout=60.0
+        )
+        return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+
+@app.delete("/voices/{name}")
+async def delete_voice(name: str):
+    """Proxy voice deletion to backend"""
+    async with httpx.AsyncClient() as c:
+        resp = await c.delete(f"{TTS_BASE_URL}/voices/{name}", timeout=30.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
 
 @app.websocket("/ws/tts")
 async def websocket_tts(websocket: WebSocket):
