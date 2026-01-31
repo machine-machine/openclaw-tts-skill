@@ -262,7 +262,7 @@ async def health():
         "speakers_count": len(SPEAKERS) if MODEL_TYPE == "customvoice" else 0,
         "ffmpeg": ffmpeg_ok,
         "codecs": codecs,
-        "version": "1.4.0-static-ffmpeg"
+        "version": "1.4.1-path-fix"
     })
 
 @app.get("/speakers", tags=["Info"])

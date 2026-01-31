@@ -30,6 +30,8 @@ COPY server.py /app/server.py
 
 ENV HF_HOME=/models
 ENV TRANSFORMERS_CACHE=/models
+# Ensure our static ffmpeg is used (before conda's)
+ENV PATH="/usr/local/bin:${PATH}"
 
 EXPOSE 8000
 
