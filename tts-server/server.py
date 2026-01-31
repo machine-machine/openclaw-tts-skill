@@ -1,112 +1,171 @@
+"""
+Qwen3-TTS Server - FastAPI wrapper for Qwen/Qwen3-TTS
+"""
 import os
 import io
+import logging
 import torch
-import numpy as np
-import uvicorn
-from typing import Optional, Literal, Generator
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from transformers import AutoModelForCausalLM, AutoTokenizer
 import soundfile as sf
+from fastapi import FastAPI, HTTPException, Response, Query
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
+from contextlib import asynccontextmanager
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configuration
-MODEL_ID = os.getenv("MODEL_ID", "Qwen/Qwen2.5-Coder-0.5B")  # Placeholder - will use actual TTS model
+MODEL_ID = os.getenv("MODEL_ID", "Qwen/Qwen3-TTS")
+HF_TOKEN = os.getenv("HF_TOKEN", os.getenv("HUGGING_FACE_HUB_TOKEN"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 SAMPLE_RATE = 24000
 
-# Global model variables
 model = None
 processor = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global model, processor
-    print(f"Loading TTS model on {DEVICE}...")
     
-    # For now, we'll create a simple placeholder
-    # Real Qwen3-TTS integration would go here
-    print("TTS Server ready (placeholder mode)")
+    logger.info(f"Loading {MODEL_ID} on {DEVICE} with {DTYPE}...")
+    
+    try:
+        # Login to HF if token provided
+        if HF_TOKEN:
+            from huggingface_hub import login
+            login(token=HF_TOKEN)
+            logger.info("Logged into Hugging Face")
+        
+        # Try loading Qwen3-TTS
+        # The model architecture may vary - try different loaders
+        from transformers import AutoModel, AutoProcessor, AutoTokenizer
+        
+        try:
+            # Try as speech model
+            processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+            model = AutoModel.from_pretrained(
+                MODEL_ID,
+                torch_dtype=DTYPE,
+                device_map="auto" if DEVICE == "cuda" else None,
+                trust_remote_code=True
+            )
+        except Exception as e:
+            logger.warning(f"AutoModel failed: {e}, trying alternative...")
+            # Fallback: try with specific class if available
+            from transformers import pipeline
+            model = pipeline("text-to-speech", model=MODEL_ID, device=0 if DEVICE == "cuda" else -1)
+            processor = None
+        
+        if hasattr(model, 'eval'):
+            model.eval()
+        
+        logger.info(f"Model loaded successfully on {DEVICE}")
+        
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        raise
     
     yield
     
-    print("Shutting down TTS server...")
+    logger.info("Shutting down...")
+    del model
+    del processor
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
 
-app = FastAPI(title="Qwen TTS Server", lifespan=lifespan)
+app = FastAPI(title="Qwen3-TTS Server", lifespan=lifespan)
 
 class TTSRequest(BaseModel):
-    text: str = Field(..., min_length=1)
+    text: str = Field(..., min_length=1, max_length=5000)
     voice: str = Field(default="default")
-    format: Literal["mp3", "wav", "ogg"] = Field(default="wav")
-    stream: bool = Field(default=False)
+    format: Literal["wav", "mp3", "ogg"] = Field(default="wav")
 
-def generate_silence(duration_ms: int, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
-    """Generate silence as placeholder"""
-    samples = int(sample_rate * duration_ms / 1000)
-    return np.zeros(samples, dtype=np.float32)
-
-def text_to_audio_placeholder(text: str) -> np.ndarray:
-    """Placeholder - generates silence proportional to text length"""
-    # ~100ms per character as rough approximation
-    duration_ms = len(text) * 100
-    return generate_silence(duration_ms)
-
-def convert_audio(audio_array: np.ndarray, format: str, rate: int) -> bytes:
-    """Convert numpy audio to bytes in specified format"""
-    buffer = io.BytesIO()
+def synthesize(text: str, voice: str = "default") -> bytes:
+    """Generate speech from text"""
+    global model, processor
     
-    if format == "wav":
-        sf.write(buffer, audio_array, rate, format='WAV')
-    elif format == "ogg":
-        sf.write(buffer, audio_array, rate, format='OGG')
-    elif format == "mp3":
-        # Fallback to wav if no mp3 encoder
-        sf.write(buffer, audio_array, rate, format='WAV')
+    if model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
     
-    buffer.seek(0)
-    return buffer.read()
-
-def chunk_generator(data: bytes, chunk_size: int = 4096):
-    for i in range(0, len(data), chunk_size):
-        yield data[i:i + chunk_size]
+    try:
+        with torch.no_grad():
+            if processor is not None:
+                # Using processor + model
+                inputs = processor(text=text, return_tensors="pt")
+                if DEVICE == "cuda":
+                    inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+                
+                # Generate audio
+                if hasattr(model, 'generate'):
+                    output = model.generate(**inputs)
+                else:
+                    output = model(**inputs)
+                
+                # Extract audio tensor
+                if hasattr(output, 'audio'):
+                    audio = output.audio
+                elif hasattr(output, 'waveform'):
+                    audio = output.waveform
+                elif isinstance(output, tuple):
+                    audio = output[0]
+                else:
+                    audio = output
+                
+                audio_np = audio.cpu().numpy().squeeze()
+            else:
+                # Using pipeline
+                result = model(text)
+                audio_np = result["audio"]
+                global SAMPLE_RATE
+                SAMPLE_RATE = result.get("sampling_rate", SAMPLE_RATE)
+        
+        # Convert to WAV bytes
+        buffer = io.BytesIO()
+        sf.write(buffer, audio_np, SAMPLE_RATE, format='WAV')
+        buffer.seek(0)
+        return buffer.read()
+        
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        raise HTTPException(status_code=507, detail="GPU out of memory")
+    except Exception as e:
+        logger.error(f"Synthesis error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health():
     return {
-        "status": "ok", 
+        "status": "ok",
+        "model": MODEL_ID,
         "device": DEVICE,
-        "mode": "placeholder",
-        "note": "Replace with Qwen3-TTS when GPU available"
+        "cuda_available": torch.cuda.is_available(),
+        "model_loaded": model is not None
     }
 
+@app.get("/")
+async def root():
+    return {"message": "Qwen3-TTS Server", "status": "running"}
+
 @app.post("/v1/audio/speech")
-async def speech(payload: TTSRequest):
-    try:
-        # Generate audio (placeholder)
-        audio = text_to_audio_placeholder(payload.text)
-        audio_bytes = convert_audio(audio, payload.format, SAMPLE_RATE)
-        
-        media_type = f"audio/{payload.format}"
-        
-        if payload.stream:
-            return StreamingResponse(
-                chunk_generator(audio_bytes),
-                media_type=media_type
-            )
-        else:
-            return Response(
-                content=audio_bytes,
-                media_type=media_type,
-                headers={"Content-Disposition": f"attachment; filename=speech.{payload.format}"}
-            )
-            
-    except Exception as e:
-        print(f"TTS error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+async def openai_speech(request: TTSRequest):
+    """OpenAI-compatible TTS endpoint"""
+    audio = synthesize(request.text, request.voice)
+    return Response(
+        content=audio,
+        media_type="audio/wav",
+        headers={"Content-Disposition": f"attachment; filename=speech.wav"}
+    )
+
+@app.get("/api/tts")
+async def coqui_compatible(
+    text: str = Query(..., min_length=1, max_length=5000),
+    speaker_id: Optional[str] = None
+):
+    """Coqui-compatible TTS endpoint"""
+    audio = synthesize(text, speaker_id or "default")
+    return Response(content=audio, media_type="audio/wav")
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

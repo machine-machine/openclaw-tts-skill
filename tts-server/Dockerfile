@@ -1,28 +1,31 @@
-# Qwen3-TTS Server
-# GPU required - uses CUDA
-FROM nvidia/cuda:12.1-runtime-ubuntu22.04
+# Qwen3-TTS Server with GPU support
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
-# Install Python and dependencies
-RUN apt-get update && apt-get install -y \
-    python3 python3-pip git ffmpeg \
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl ffmpeg libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone Qwen3-TTS
-RUN git clone --depth 1 https://github.com/QwenLM/Qwen3-TTS.git /app/qwen3-tts
+# Install Python packages
+RUN pip install --no-cache-dir \
+    transformers>=4.45.0 \
+    accelerate \
+    soundfile \
+    scipy \
+    fastapi \
+    uvicorn[standard] \
+    huggingface_hub
 
-WORKDIR /app/qwen3-tts
+# Pre-download model (will use HF token from env)
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
+RUN python -c "from huggingface_hub import login; login(token='${HF_TOKEN}')" 2>/dev/null || true
 
-# Install requirements
-RUN pip3 install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-RUN pip3 install --no-cache-dir transformers accelerate soundfile fastapi uvicorn
-
-# Create API wrapper
+# Copy server
 COPY server.py /app/server.py
-
-WORKDIR /app
 
 EXPOSE 8000
 
-CMD ["python3", "server.py"]
+CMD ["python", "server.py"]

@@ -1,28 +1,42 @@
 version: "3.9"
 
-# m2 Voice Stack - TTS for OpenClaw
-# Using Coqui TTS with HTTP API
+# m2 Voice Stack - Qwen3-TTS with RTX 3090
+# Deploy via Coolify to voice.machinemachine.ai
 
 services:
-  # Coqui TTS Server
-  coqui-tts:
-    image: ghcr.io/coqui-ai/tts:latest
-    container_name: m2-coqui-tts
+  # Qwen3-TTS Backend (GPU)
+  qwen-tts:
+    build:
+      context: ./tts-server
+      dockerfile: Dockerfile
+      args:
+        HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN}
+    container_name: m2-qwen-tts
     restart: unless-stopped
-    entrypoint: ["python3", "-m", "TTS.server.server"]
-    command: ["--model_name", "tts_models/en/ljspeech/tacotron2-DDC", "--use_cuda", "false"]
+    shm_size: "8g"
     environment:
-      - COQUI_TOS_AGREED=1
+      - TZ=UTC
+      - CUDA_VISIBLE_DEVICES=1
+      - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - MODEL_ID=Qwen/Qwen3-TTS
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
     volumes:
-      - tts-models:/root/.local/share/tts
+      - hf-cache:/root/.cache/huggingface
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:5002/"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 180s
 
-  # Gateway API (OpenAI compatible wrapper)
+  # Gateway API
   speech-gateway:
     build:
       context: ./gateway
@@ -30,14 +44,14 @@ services:
     container_name: m2-voice-gateway
     restart: unless-stopped
     environment:
-      - TTS_BASE_URL=http://coqui-tts:5002
-      - TTS_TYPE=coqui
+      - TTS_BASE_URL=http://qwen-tts:8000
+      - TTS_TYPE=openai
       - PUBLIC_URL=https://voice.machinemachine.ai
       - STORAGE_DIR=/app/output
     volumes:
       - tts-output:/app/output
     depends_on:
-      - coqui-tts
+      - qwen-tts
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 30s
@@ -46,5 +60,5 @@ services:
       start_period: 30s
 
 volumes:
-  tts-models:
+  hf-cache:
   tts-output:
