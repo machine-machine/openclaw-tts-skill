@@ -1,0 +1,46 @@
+version: "3.9"
+
+# m2 Voice Stack - CPU-only version using Piper TTS
+# Much faster inference, no GPU needed
+# Deploy via Coolify: Docker Compose from Git repo
+
+services:
+  # Piper TTS - fast, lightweight, CPU-friendly
+  piper-tts:
+    image: rhasspy/wyoming-piper:latest
+    container_name: m2-piper-tts
+    restart: unless-stopped
+    environment:
+      - TZ=UTC
+    command: --voice en_US-lessac-medium
+    volumes:
+      - piper-data:/data
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10200"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Gateway with Piper adapter
+  speech-gateway:
+    build: ./gateway
+    container_name: m2-voice-gateway
+    restart: unless-stopped
+    environment:
+      - TTS_BASE_URL=http://piper-tts:10200
+      - TTS_TYPE=piper
+      - PUBLIC_URL=https://voice.machinemachine.ai
+      - STORAGE_DIR=/app/output
+    depends_on:
+      - piper-tts
+    volumes:
+      - tts-output:/app/output
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  piper-data:
+  tts-output:

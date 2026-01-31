@@ -1,0 +1,54 @@
+version: "3.9"
+
+# m2 Voice Stack - TTS for OpenClaw
+# Deploy via Coolify: Docker Compose from Git repo
+
+services:
+  # TTS Backend (GPU required for Qwen3-TTS)
+  # For CPU-only, use coqui-tts or piper instead
+  qwen-tts:
+    build: ./tts-server
+    container_name: m2-tts-backend
+    restart: unless-stopped
+    shm_size: "8g"
+    environment:
+      - TZ=UTC
+      - CUDA_VISIBLE_DEVICES=0
+      - MODEL_ID=Qwen/Qwen3-TTS-1.7B
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    volumes:
+      - tts-cache:/app/cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # No ports - Coolify handles routing
+
+  # Gateway (lightweight, CPU-only)
+  speech-gateway:
+    build: ./gateway
+    container_name: m2-voice-gateway
+    restart: unless-stopped
+    environment:
+      - TTS_BASE_URL=http://qwen-tts:8000
+      - PUBLIC_URL=https://voice.machinemachine.ai
+      - STORAGE_DIR=/app/output
+    depends_on:
+      - qwen-tts
+    volumes:
+      - tts-output:/app/output
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # No ports - Coolify handles routing
+
+volumes:
+  tts-cache:
+  tts-output:
