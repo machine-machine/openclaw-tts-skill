@@ -187,9 +187,10 @@ def audio_to_bytes(wav: np.ndarray, sr: int, format: str = "wav") -> bytes:
                 return f.read()
         
         # Run ffmpeg
+        logger.info(f"Running ffmpeg: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, timeout=30)
         if result.returncode != 0:
-            logger.warning(f"ffmpeg conversion failed: {result.stderr.decode()}")
+            logger.error(f"ffmpeg conversion failed (rc={result.returncode}): {result.stderr.decode()}")
             # Fallback to wav
             with open(wav_path, "rb") as f:
                 return f.read()
@@ -229,6 +230,14 @@ async def root():
 
 @app.get("/health", tags=["System"])
 async def health():
+    # Check ffmpeg availability
+    import subprocess
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        ffmpeg_ok = result.returncode == 0
+    except:
+        ffmpeg_ok = False
+    
     return JSONResponse({
         "status": "ok" if custom_voice_model else "loading",
         "model_loaded": custom_voice_model is not None,
@@ -238,7 +247,8 @@ async def health():
         "device": DEVICE,
         "cuda_available": torch.cuda.is_available(),
         "speakers_count": len(SPEAKERS) if MODEL_TYPE == "customvoice" else 0,
-        "version": "1.1.0"
+        "ffmpeg": ffmpeg_ok,
+        "version": "1.2.0-opus"
     })
 
 @app.get("/speakers", tags=["Info"])
