@@ -1,27 +1,27 @@
 import os
 import uuid
 import logging
+import io
 import aiofiles
 import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, Literal
+from pydantic import BaseModel, Field
+from typing import Literal
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://qwen-tts:8000")
+TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://coqui-tts:5002")
+TTS_TYPE = os.getenv("TTS_TYPE", "coqui")  # coqui, openai, piper
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")
 STORAGE_DIR = os.getenv("STORAGE_DIR", "/app/output")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
 app = FastAPI(title="m2 Voice Gateway", version="1.0.0")
 
-# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,104 +30,111 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pydantic Models
 class SpeechRequest(BaseModel):
-    text: str
-    voice: str = "default"
-    format: Literal["mp3", "wav", "ogg"] = "mp3"
-    stream: bool = False
+    text: str = Field(..., min_length=1, max_length=5000)
+    voice: str = Field(default="default")
+    format: Literal["mp3", "wav", "ogg"] = Field(default="wav")
+    stream: bool = Field(default=False)
 
 class SpeakFileRequest(BaseModel):
-    text: str
-    voice: str = "default"
-    format: Literal["mp3", "wav", "ogg"] = "mp3"
+    text: str = Field(..., min_length=1, max_length=5000)
+    voice: str = Field(default="default")
+    format: Literal["mp3", "wav", "ogg"] = Field(default="wav")
 
-# HTTP Client for Backend Proxy
 client = httpx.AsyncClient(timeout=120.0)
 
 @app.on_event("shutdown")
-async def shutdown_event():
+async def shutdown():
     await client.aclose()
 
+async def synthesize_coqui(text: str, speaker_id: str = None) -> bytes:
+    """Call Coqui TTS API"""
+    params = {"text": text}
+    if speaker_id:
+        params["speaker_id"] = speaker_id
+    
+    resp = await client.get(f"{TTS_BASE_URL}/api/tts", params=params)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=f"TTS error: {resp.text}")
+    return resp.content
+
+async def synthesize_openai(text: str, voice: str, format: str) -> bytes:
+    """Call OpenAI-compatible TTS API"""
+    resp = await client.post(
+        f"{TTS_BASE_URL}/v1/audio/speech",
+        json={"text": text, "voice": voice, "format": format}
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=f"TTS error: {resp.text}")
+    return resp.content
+
+async def synthesize(text: str, voice: str = "default", format: str = "wav") -> bytes:
+    """Route to appropriate TTS backend"""
+    if TTS_TYPE == "coqui":
+        return await synthesize_coqui(text, voice if voice != "default" else None)
+    elif TTS_TYPE == "openai":
+        return await synthesize_openai(text, voice, format)
+    else:
+        raise HTTPException(status_code=500, detail=f"Unknown TTS type: {TTS_TYPE}")
+
 @app.get("/health")
-async def health_check():
-    """Health check endpoint"""
+async def health():
     try:
-        resp = await client.get(f"{TTS_BASE_URL}/health", timeout=5.0)
-        backend_status = "healthy" if resp.status_code == 200 else "degraded"
+        if TTS_TYPE == "coqui":
+            resp = await client.get(f"{TTS_BASE_URL}/", timeout=5.0)
+            backend_ok = resp.status_code == 200
+        else:
+            resp = await client.get(f"{TTS_BASE_URL}/health", timeout=5.0)
+            backend_ok = resp.status_code == 200
     except:
-        backend_status = "unavailable"
+        backend_ok = False
     
     return {
         "status": "healthy",
         "backend": TTS_BASE_URL,
-        "backend_status": backend_status
+        "backend_type": TTS_TYPE,
+        "backend_status": "ok" if backend_ok else "unavailable"
     }
 
 @app.post("/v1/audio/speech")
 async def openai_speech(request: SpeechRequest):
-    """OpenAI compatible TTS endpoint"""
-    backend_url = f"{TTS_BASE_URL}/v1/audio/speech"
-    
+    """OpenAI-compatible TTS endpoint"""
     try:
-        payload = request.dict()
-        
-        if request.stream:
-            async def generate():
-                async with client.stream("POST", backend_url, json=payload) as resp:
-                    if resp.status_code != 200:
-                        error_detail = await resp.aread()
-                        raise HTTPException(status_code=resp.status_code, detail=error_detail.decode())
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
-            
-            return StreamingResponse(generate(), media_type=f"audio/{request.format}")
-        else:
-            resp = await client.post(backend_url, json=payload)
-            if resp.status_code != 200:
-                raise HTTPException(status_code=resp.status_code, detail=resp.text)
-            
-            return StreamingResponse(
-                iter([resp.content]),
-                media_type=f"audio/{request.format}",
-                headers={"Content-Disposition": f"attachment; filename=speech.{request.format}"}
-            )
-
+        audio = await synthesize(request.text, request.voice, request.format)
+        return Response(
+            content=audio,
+            media_type=f"audio/{request.format}",
+            headers={"Content-Disposition": f"attachment; filename=speech.{request.format}"}
+        )
     except httpx.RequestError as e:
-        logger.error(f"Backend connection error: {e}")
-        raise HTTPException(status_code=503, detail="Backend service unavailable")
+        logger.error(f"Backend error: {e}")
+        raise HTTPException(status_code=503, detail="TTS backend unavailable")
 
 @app.post("/speak/file")
 async def speak_file(request: SpeakFileRequest):
-    """Generate audio file, save locally, return URL"""
-    backend_url = f"{TTS_BASE_URL}/v1/audio/speech"
-    
+    """Generate audio file and return URL"""
     try:
-        payload = {"text": request.text, "voice": request.voice, "format": request.format, "stream": False}
+        audio = await synthesize(request.text, request.voice, request.format)
         
-        resp = await client.post(backend_url, json=payload)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail=resp.text)
-
         file_id = f"{uuid.uuid4()}.{request.format}"
         file_path = os.path.join(STORAGE_DIR, file_id)
         
         async with aiofiles.open(file_path, "wb") as f:
-            await f.write(resp.content)
-
-        base_url = PUBLIC_URL.rstrip('/') if PUBLIC_URL else ""
-        file_url = f"{base_url}/files/{file_id}"
+            await f.write(audio)
         
-        return {"url": file_url, "format": request.format, "id": file_id}
-
+        base_url = PUBLIC_URL.rstrip('/') if PUBLIC_URL else ""
+        return {
+            "url": f"{base_url}/files/{file_id}",
+            "format": request.format,
+            "id": file_id
+        }
     except httpx.RequestError as e:
-        logger.error(f"Backend connection error: {e}")
-        raise HTTPException(status_code=503, detail="Backend service unavailable")
+        logger.error(f"Backend error: {e}")
+        raise HTTPException(status_code=503, detail="TTS backend unavailable")
 
 @app.get("/files/{filename}")
 async def get_file(filename: str):
     """Serve generated audio files"""
-    # Security: only allow alphanumeric + dots
     if not filename.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid filename")
     
@@ -139,43 +146,29 @@ async def get_file(filename: str):
 
 @app.websocket("/ws/tts")
 async def websocket_tts(websocket: WebSocket):
-    """WebSocket for streaming audio - send JSON, receive binary chunks"""
+    """WebSocket for real-time TTS"""
     await websocket.accept()
-    backend_url = f"{TTS_BASE_URL}/v1/audio/speech"
     
     try:
         while True:
             data = await websocket.receive_json()
             text = data.get("text")
             voice = data.get("voice", "default")
-            format = data.get("format", "mp3")
+            format = data.get("format", "wav")
             
             if not text:
                 await websocket.send_json({"error": "Missing 'text' field"})
                 continue
-
-            payload = {"text": text, "voice": voice, "format": format, "stream": True}
             
             try:
-                async with client.stream("POST", backend_url, json=payload) as resp:
-                    if resp.status_code != 200:
-                        error_msg = await resp.aread()
-                        await websocket.send_json({"error": f"Backend error: {error_msg.decode()}"})
-                        continue
-                    
-                    async for chunk in resp.aiter_bytes():
-                        await websocket.send_bytes(chunk)
-                        
-                    await websocket.send_json({"status": "done"})
-                    
-            except httpx.RequestError as e:
-                logger.error(f"WS Backend error: {e}")
-                await websocket.send_json({"error": "Backend unavailable"})
-
+                audio = await synthesize(text, voice, format)
+                await websocket.send_bytes(audio)
+                await websocket.send_json({"status": "done", "bytes": len(audio)})
+            except Exception as e:
+                await websocket.send_json({"error": str(e)})
+                
     except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.info("WebSocket disconnected")
 
 if __name__ == "__main__":
     import uvicorn

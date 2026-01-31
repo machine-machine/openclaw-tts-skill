@@ -1,54 +1,50 @@
 version: "3.9"
 
 # m2 Voice Stack - TTS for OpenClaw
-# Deploy via Coolify: Docker Compose from Git repo
+# Using Coqui TTS with HTTP API
 
 services:
-  # TTS Backend (GPU required for Qwen3-TTS)
-  # For CPU-only, use coqui-tts or piper instead
-  qwen-tts:
-    build: ./tts-server
-    container_name: m2-tts-backend
+  # Coqui TTS Server
+  coqui-tts:
+    image: ghcr.io/coqui-ai/tts:latest
+    container_name: m2-coqui-tts
     restart: unless-stopped
-    shm_size: "8g"
+    entrypoint: ["python3", "-m", "TTS.server.server"]
+    command: ["--model_name", "tts_models/en/ljspeech/tacotron2-DDC", "--use_cuda", "false"]
     environment:
-      - TZ=UTC
-      - CUDA_VISIBLE_DEVICES=1
-      - MODEL_ID=Qwen/Qwen3-TTS-1.7B
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: ["gpu"]
+      - COQUI_TOS_AGREED=1
     volumes:
-      - tts-cache:/app/cache
+      - tts-models:/root/.local/share/tts
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:5002/"]
       interval: 30s
       timeout: 10s
-      retries: 3
-    # No ports - Coolify handles routing
+      retries: 5
+      start_period: 120s
 
-  # Gateway (lightweight, CPU-only)
+  # Gateway API (OpenAI compatible wrapper)
   speech-gateway:
-    build: ./gateway
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
     container_name: m2-voice-gateway
     restart: unless-stopped
     environment:
-      - TTS_BASE_URL=http://qwen-tts:8000
+      - TTS_BASE_URL=http://coqui-tts:5002
+      - TTS_TYPE=coqui
       - PUBLIC_URL=https://voice.machinemachine.ai
       - STORAGE_DIR=/app/output
-    depends_on:
-      - qwen-tts
     volumes:
       - tts-output:/app/output
+    depends_on:
+      - coqui-tts
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-    # No ports - Coolify handles routing
+      start_period: 30s
 
 volumes:
-  tts-cache:
+  tts-models:
   tts-output:
