@@ -56,14 +56,24 @@ async def lifespan(app: FastAPI):
     try:
         from qwen_tts import Qwen3TTSModel
         
-        logger.info("Loading Qwen3-TTS CustomVoice 1.7B...")
-        custom_voice_model = Qwen3TTSModel.from_pretrained(
-            "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-            device_map=DEVICE,
-            dtype=DTYPE,
-            token=HF_TOKEN,
-            cache_dir=MODELS_DIR,
-        )
+        # Check for local model path first
+        local_model_path = os.getenv("LOCAL_MODEL_PATH")
+        if local_model_path and os.path.isdir(local_model_path):
+            logger.info(f"Loading Qwen3-TTS from local path: {local_model_path}")
+            custom_voice_model = Qwen3TTSModel.from_pretrained(
+                local_model_path,
+                device_map=DEVICE,
+                dtype=DTYPE,
+            )
+        else:
+            logger.info("Loading Qwen3-TTS CustomVoice 1.7B from HuggingFace...")
+            custom_voice_model = Qwen3TTSModel.from_pretrained(
+                "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                device_map=DEVICE,
+                dtype=DTYPE,
+                token=HF_TOKEN,
+                cache_dir=MODELS_DIR,
+            )
         model_load_time = time.time() - start
         logger.info(f"Model loaded in {model_load_time:.2f}s")
         

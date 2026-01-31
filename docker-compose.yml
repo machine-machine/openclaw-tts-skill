@@ -13,6 +13,7 @@ services:
       - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN}
       - HF_HOME=/models
       - TRANSFORMERS_CACHE=/models
+      - LOCAL_MODEL_PATH=/models/qwen-tts-1.7b-customvoice
     deploy:
       resources:
         reservations:
@@ -21,7 +22,8 @@ services:
               device_ids: ["1"]
               capabilities: [gpu]
     volumes:
-      - models:/models
+      # Bind mount the local model from host
+      - /home/hi/models:/models
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 30s
@@ -54,7 +56,6 @@ services:
       - coolify
 
 volumes:
-  models:
   tts_output:
 
 networks:
