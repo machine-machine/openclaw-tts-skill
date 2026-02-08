@@ -17,6 +17,27 @@ from typing import Literal, List
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Verify ffmpeg is available at startup
+def _check_ffmpeg() -> str:
+    """Check ffmpeg availability and return version string."""
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        if result.returncode == 0:
+            version_line = result.stdout.decode().split("\n")[0]
+            logger.info(f"ffmpeg available: {version_line}")
+            return version_line
+        else:
+            logger.error("ffmpeg found but returned non-zero exit code")
+            return "error"
+    except FileNotFoundError:
+        logger.error("ffmpeg NOT FOUND - audio concatenation will fail for chunked requests!")
+        return "missing"
+    except Exception as e:
+        logger.error(f"ffmpeg check failed: {e}")
+        return f"error: {e}"
+
+FFMPEG_VERSION = _check_ffmpeg()
+
 # Chunking config
 CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "200"))  # Max chars per chunk
 CHUNK_ENABLED = os.getenv("CHUNK_ENABLED", "true").lower() in ("true", "1", "yes")
@@ -290,7 +311,9 @@ async def health():
         "backend_type": TTS_TYPE,
         "backend_status": "ok" if backend_ok else "unavailable",
         "backend_health": backend_health,
-        "gateway_version": "1.1.0"
+        "ffmpeg": FFMPEG_VERSION,
+        "chunking": {"enabled": CHUNK_ENABLED, "max_chars": CHUNK_MAX_CHARS},
+        "gateway_version": "1.2.0"
     }
 
 @app.post("/v1/audio/speech")
