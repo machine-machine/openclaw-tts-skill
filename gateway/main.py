@@ -1,17 +1,25 @@
 import os
+import re
 import uuid
 import logging
 import io
+import asyncio
+import subprocess
+import tempfile
 import aiofiles
 import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, List
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Chunking config
+CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "200"))  # Max chars per chunk
+CHUNK_ENABLED = os.getenv("CHUNK_ENABLED", "true").lower() in ("true", "1", "yes")
 
 # Configuration
 TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://coqui-tts:5002")
@@ -67,6 +75,120 @@ class SpeakFileRequest(BaseModel):
 
 client = httpx.AsyncClient(timeout=120.0)
 
+
+def split_text_into_chunks(text: str, max_chars: int = CHUNK_MAX_CHARS) -> List[str]:
+    """Split text into chunks at sentence boundaries, respecting max_chars.
+    
+    Strategy:
+    1. Split on sentence boundaries (. ! ? followed by space or end)
+    2. If a sentence is still too long, split on clause boundaries (, ; : —)
+    3. Last resort: split on word boundaries
+    """
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    remaining = text.strip()
+    
+    while remaining:
+        if len(remaining) <= max_chars:
+            chunks.append(remaining)
+            break
+        
+        # Try to find a sentence boundary within max_chars
+        best_split = -1
+        
+        # Priority 1: Sentence endings (. ! ? followed by space)
+        for m in re.finditer(r'[.!?]+[\s]', remaining[:max_chars + 10]):
+            pos = m.end()
+            if pos <= max_chars:
+                best_split = pos
+        
+        # Priority 2: Clause boundaries (, ; : — followed by space)
+        if best_split == -1:
+            for m in re.finditer(r'[,;:\u2014]\s', remaining[:max_chars + 5]):
+                pos = m.end()
+                if pos <= max_chars:
+                    best_split = pos
+        
+        # Priority 3: Last space before max_chars
+        if best_split == -1:
+            space_pos = remaining.rfind(' ', 0, max_chars)
+            if space_pos > 0:
+                best_split = space_pos + 1
+        
+        # Last resort: hard split at max_chars
+        if best_split == -1:
+            best_split = max_chars
+        
+        chunk = remaining[:best_split].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[best_split:].strip()
+    
+    return [c for c in chunks if c]
+
+
+def concatenate_audio_ffmpeg(audio_chunks: List[bytes], output_format: str) -> bytes:
+    """Concatenate audio chunks using ffmpeg concat demuxer."""
+    with tempfile.TemporaryDirectory(prefix="tts_concat_") as tmpdir:
+        # Write each chunk to a file
+        input_files = []
+        for i, chunk in enumerate(audio_chunks):
+            fpath = os.path.join(tmpdir, f"chunk_{i:04d}.{output_format}")
+            with open(fpath, "wb") as f:
+                f.write(chunk)
+            input_files.append(fpath)
+        
+        # Create concat list file
+        list_path = os.path.join(tmpdir, "concat.txt")
+        with open(list_path, "w") as f:
+            for fpath in input_files:
+                f.write(f"file '{fpath}'\n")
+        
+        # Output file
+        out_path = os.path.join(tmpdir, f"output.{output_format}")
+        
+        # Run ffmpeg concat
+        cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", list_path,
+            "-c", "copy",  # No re-encoding, just concatenate
+            out_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        
+        if result.returncode != 0:
+            # If copy fails (incompatible streams), try with re-encoding
+            logger.warning(f"ffmpeg concat copy failed, re-encoding: {result.stderr.decode()[-200:]}")
+            if output_format == "opus":
+                cmd = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    "-i", list_path,
+                    "-c:a", "libopus", "-b:a", "64k", "-ar", "24000",
+                    out_path
+                ]
+            elif output_format == "mp3":
+                cmd = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    "-i", list_path,
+                    "-c:a", "libmp3lame", "-b:a", "128k",
+                    out_path
+                ]
+            else:
+                cmd = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    "-i", list_path,
+                    out_path
+                ]
+            result = subprocess.run(cmd, capture_output=True, timeout=60)
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg concatenation failed: {result.stderr.decode()[-300:]}")
+        
+        with open(out_path, "rb") as f:
+            return f.read()
+
 @app.on_event("shutdown")
 async def shutdown():
     await client.aclose()
@@ -82,13 +204,11 @@ async def synthesize_coqui(text: str, speaker_id: str = None) -> bytes:
         raise HTTPException(status_code=resp.status_code, detail=f"TTS error: {resp.text}")
     return resp.content
 
-async def synthesize_openai(text: str, voice: str, format: str, language: str = "auto", instruct: str = None) -> bytes:
-    """Call OpenAI-compatible TTS API with style instructions"""
+async def synthesize_openai_single(text: str, voice: str, format: str, language: str = "auto", instruct: str = None) -> bytes:
+    """Call OpenAI-compatible TTS API for a single chunk."""
     payload = {"text": text, "voice": voice, "format": format, "language": language}
     if instruct:
         payload["instruct"] = instruct
-    
-    logger.info(f"Sending to backend: format={format}, voice={voice}, text_len={len(text)}")
     
     resp = await client.post(
         f"{TTS_BASE_URL}/v1/audio/speech",
@@ -97,6 +217,43 @@ async def synthesize_openai(text: str, voice: str, format: str, language: str = 
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=f"TTS error: {resp.text}")
     return resp.content
+
+
+async def synthesize_openai(text: str, voice: str, format: str, language: str = "auto", instruct: str = None) -> bytes:
+    """Call OpenAI-compatible TTS API with automatic chunking for long texts."""
+    
+    # Short texts: no chunking needed
+    if not CHUNK_ENABLED or len(text) <= CHUNK_MAX_CHARS:
+        logger.info(f"TTS single: format={format}, voice={voice}, text_len={len(text)}")
+        return await synthesize_openai_single(text, voice, format, language, instruct)
+    
+    # Long texts: split into chunks and generate each
+    chunks = split_text_into_chunks(text, CHUNK_MAX_CHARS)
+    logger.info(f"TTS chunked: format={format}, voice={voice}, text_len={len(text)}, chunks={len(chunks)}")
+    
+    if len(chunks) == 1:
+        return await synthesize_openai_single(chunks[0], voice, format, language, instruct)
+    
+    # Generate all chunks (sequentially to avoid GPU contention)
+    audio_chunks = []
+    for i, chunk in enumerate(chunks):
+        logger.info(f"  Chunk {i+1}/{len(chunks)}: {len(chunk)} chars")
+        try:
+            audio = await synthesize_openai_single(chunk, voice, format, language, instruct)
+            audio_chunks.append(audio)
+        except Exception as e:
+            logger.error(f"  Chunk {i+1} failed: {e}")
+            raise
+    
+    # Concatenate audio chunks
+    logger.info(f"Concatenating {len(audio_chunks)} audio chunks...")
+    try:
+        result = concatenate_audio_ffmpeg(audio_chunks, format)
+        logger.info(f"Concatenation done: {len(result)} bytes")
+        return result
+    except Exception as e:
+        logger.error(f"Concatenation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Audio concatenation failed: {e}")
 
 async def synthesize(text: str, voice: str = "default", format: str = "wav", language: str = "auto", instruct: str = None) -> bytes:
     """Route to appropriate TTS backend"""
