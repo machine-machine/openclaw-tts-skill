@@ -320,6 +320,43 @@ async def synthesize_openai(text: str, voice: str, format: str, language: str = 
         logger.error(f"Concatenation failed: {e}")
         raise HTTPException(status_code=500, detail=f"Audio concatenation failed: {e}")
 
+SILENCE_PAD_MS = int(os.getenv("SILENCE_PAD_MS", "400"))  # ms of silence added at end
+
+def _pad_silence(audio: bytes, fmt: str) -> bytes:
+    """Append a short silence to prevent abrupt cut-off at end of audio."""
+    if SILENCE_PAD_MS <= 0 or not audio:
+        return audio
+    try:
+        with tempfile.TemporaryDirectory(prefix="pad_") as tmpdir:
+            in_path = os.path.join(tmpdir, f"in.{fmt}")
+            out_path = os.path.join(tmpdir, f"out.{fmt}")
+            with open(in_path, "wb") as f:
+                f.write(audio)
+
+            pad_sec = SILENCE_PAD_MS / 1000.0
+            if fmt == "opus":
+                cmd = ["ffmpeg", "-y", "-i", in_path,
+                       "-af", f"apad=pad_dur={pad_sec}",
+                       "-c:a", "libopus", "-b:a", "64k", out_path]
+            elif fmt == "mp3":
+                cmd = ["ffmpeg", "-y", "-i", in_path,
+                       "-af", f"apad=pad_dur={pad_sec}",
+                       "-c:a", "libmp3lame", "-b:a", "128k", out_path]
+            else:
+                cmd = ["ffmpeg", "-y", "-i", in_path,
+                       "-af", f"apad=pad_dur={pad_sec}", out_path]
+
+            result = subprocess.run(cmd, capture_output=True, timeout=15)
+            if result.returncode == 0:
+                with open(out_path, "rb") as f:
+                    return f.read()
+            else:
+                logger.warning(f"Silence pad failed: {result.stderr.decode()[-200:]}")
+    except Exception as e:
+        logger.warning(f"Silence pad error: {e}")
+    return audio  # fallback: return original if padding fails
+
+
 async def synthesize(text: str, voice: str = "default", format: str = "wav", language: str = "auto", instruct: str = None, channel: Optional[str] = None) -> bytes:
     """Route to appropriate TTS backend"""
     # Resolve voice priority:
@@ -337,11 +374,13 @@ async def synthesize(text: str, voice: str = "default", format: str = "wav", lan
         logger.info(f"Using DEFAULT_VOICE fallback: {voice}")
     
     if TTS_TYPE == "coqui":
-        return await synthesize_coqui(text, voice if voice != "default" else None)
+        audio = await synthesize_coqui(text, voice if voice != "default" else None)
     elif TTS_TYPE == "openai":
-        return await synthesize_openai(text, voice, format, language, instruct)
+        audio = await synthesize_openai(text, voice, format, language, instruct)
     else:
         raise HTTPException(status_code=500, detail=f"Unknown TTS type: {TTS_TYPE}")
+
+    return _pad_silence(audio, format)
 
 @app.get("/health")
 async def health():
