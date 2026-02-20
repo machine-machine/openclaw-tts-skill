@@ -2,6 +2,7 @@ import os
 import re
 import json
 import uuid
+import time
 import logging
 import io
 import asyncio
@@ -9,11 +10,11 @@ import subprocess
 import tempfile
 import aiofiles
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Literal, List, Optional
+from typing import Literal, List, Optional, Dict, Any
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -127,6 +128,17 @@ class SpeakFileRequest(BaseModel):
     format: Literal["mp3", "wav", "ogg", "opus"] = Field(default="wav")
 
 client = httpx.AsyncClient(timeout=120.0)
+
+# Async job store — in-memory, jobs expire after 10 minutes
+_jobs: Dict[str, Dict[str, Any]] = {}
+_JOB_TTL = 600  # seconds
+
+def _gc_jobs():
+    """Remove expired jobs."""
+    now = time.time()
+    expired = [k for k, v in _jobs.items() if now - v["created_at"] > _JOB_TTL]
+    for k in expired:
+        _jobs.pop(k, None)
 
 
 def split_text_into_chunks(text: str, max_chars: int = CHUNK_MAX_CHARS) -> List[str]:
@@ -379,6 +391,75 @@ async def openai_speech(request: SpeechRequest, req: Request):
     except httpx.RequestError as e:
         logger.error(f"Backend error: {e}")
         raise HTTPException(status_code=503, detail="TTS backend unavailable")
+
+@app.post("/v1/audio/speech/async")
+async def openai_speech_async(request: SpeechRequest, req: Request, background_tasks: BackgroundTasks):
+    """
+    Non-blocking TTS — returns a job_id immediately, poll GET /v1/audio/speech/async/{job_id}.
+    Solves proxy timeout issues for long generations.
+    """
+    text = request.get_text()
+    if not text:
+        raise HTTPException(status_code=422, detail="Either 'text' or 'input' field required")
+
+    fmt = request.get_format()
+    instruct = request.get_instruct()
+    channel = req.headers.get("X-Channel", "").lower() or None
+
+    job_id = str(uuid.uuid4())
+    _gc_jobs()
+    _jobs[job_id] = {
+        "status": "pending",
+        "created_at": time.time(),
+        "format": fmt,
+        "audio": None,
+        "error": None,
+    }
+
+    async def _run():
+        try:
+            audio = await synthesize(text, request.voice, fmt, request.language, instruct, channel=channel)
+            _jobs[job_id]["audio"] = audio
+            _jobs[job_id]["status"] = "done"
+            logger.info(f"Async job {job_id} done ({len(audio)} bytes)")
+        except Exception as e:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = str(e)
+            logger.error(f"Async job {job_id} failed: {e}")
+
+    background_tasks.add_task(_run)
+    logger.info(f"Async TTS job {job_id} queued: voice={request.voice}, format={fmt}, len={len(text)}")
+    return {"job_id": job_id, "status": "pending", "poll": f"/v1/audio/speech/async/{job_id}"}
+
+
+@app.get("/v1/audio/speech/async/{job_id}")
+async def get_async_job(job_id: str):
+    """
+    Poll async TTS job.
+    Returns: {"status": "pending"} while generating.
+    Returns audio bytes with correct Content-Type when done.
+    Returns {"status": "error", "detail": "..."} on failure.
+    """
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+
+    if job["status"] == "pending":
+        return {"status": "pending", "job_id": job_id}
+
+    if job["status"] == "error":
+        raise HTTPException(status_code=500, detail=job["error"] or "Generation failed")
+
+    # Done — return audio and clean up
+    audio = job["audio"]
+    fmt = job["format"]
+    _jobs.pop(job_id, None)  # free memory
+    return Response(
+        content=audio,
+        media_type=f"audio/{fmt}",
+        headers={"Content-Disposition": f"attachment; filename=speech.{fmt}"}
+    )
+
 
 @app.post("/speak/file")
 async def speak_file(request: SpeakFileRequest):
