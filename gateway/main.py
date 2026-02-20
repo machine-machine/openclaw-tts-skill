@@ -48,14 +48,40 @@ TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://coqui-tts:5002")
 TTS_TYPE = os.getenv("TTS_TYPE", "coqui")  # coqui, openai, piper
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")
 STORAGE_DIR = os.getenv("STORAGE_DIR", "/app/output")
-# Force all requests to use this voice (for voice cloning). Empty = use requested voice.
+os.makedirs(STORAGE_DIR, exist_ok=True)
+
+# Default voice fallback (empty = use requested voice)
 DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "")
-# Per-channel voice map: JSON string e.g. '{"telegram": "vivian", "discord": "mario"}'
-# Channel names match OpenClaw channel identifiers (telegram, discord, whatsapp, signal, etc.)
-VOICE_MAP: dict = json.loads(os.getenv("VOICE_MAP", "{}"))
+
+# Persistent voice config — survives gateway restarts
+# Stored in STORAGE_DIR/voice_config.json (mounted volume)
+VOICE_CONFIG_PATH = os.path.join(STORAGE_DIR, "voice_config.json")
+
+def _load_voice_config() -> dict:
+    """Load voice config from disk, use env var VOICE_MAP as seed defaults."""
+    seed = json.loads(os.getenv("VOICE_MAP", "{}"))
+    try:
+        if os.path.exists(VOICE_CONFIG_PATH):
+            with open(VOICE_CONFIG_PATH) as f:
+                stored = json.load(f)
+            merged = {**seed, **stored}  # stored takes precedence
+            logger.info(f"Loaded voice config: {merged}")
+            return merged
+    except Exception as e:
+        logger.warning(f"Could not load voice config: {e}")
+    logger.info(f"Using seed VOICE_MAP: {seed}")
+    return seed
+
+def _save_voice_config(cfg: dict):
+    """Persist voice config to disk."""
+    with open(VOICE_CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+    logger.info(f"Saved voice config: {cfg}")
+
+# In-memory voice map — loaded at startup, updated live via /channels API
+VOICE_MAP: dict = _load_voice_config()
 
 logger.info(f"DEFAULT_VOICE={DEFAULT_VOICE!r}, VOICE_MAP={VOICE_MAP}")
-os.makedirs(STORAGE_DIR, exist_ok=True)
 
 app = FastAPI(title="m2 Voice Gateway", version="1.0.0")
 
@@ -416,6 +442,48 @@ async def delete_voice(name: str):
     async with httpx.AsyncClient() as c:
         resp = await c.delete(f"{TTS_BASE_URL}/voices/{name}", timeout=30.0)
         return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+
+class ChannelVoiceRequest(BaseModel):
+    voice: str = Field(..., description="Voice name to use for this channel")
+
+@app.get("/channels")
+async def get_channels():
+    """Get current channel → voice assignments"""
+    return {
+        "channels": VOICE_MAP,
+        "default_voice": DEFAULT_VOICE or None,
+        "config_path": VOICE_CONFIG_PATH,
+    }
+
+@app.post("/channels/{channel}")
+async def set_channel_voice(channel: str, body: ChannelVoiceRequest):
+    """Set voice for a channel — persists across restarts"""
+    global VOICE_MAP
+    VOICE_MAP[channel] = body.voice
+    _save_voice_config(VOICE_MAP)
+    logger.info(f"Channel '{channel}' → '{body.voice}' (saved)")
+    return {"ok": True, "channel": channel, "voice": body.voice}
+
+@app.delete("/channels/{channel}")
+async def clear_channel_voice(channel: str):
+    """Remove channel voice override — falls back to DEFAULT_VOICE"""
+    global VOICE_MAP
+    removed = VOICE_MAP.pop(channel, None)
+    _save_voice_config(VOICE_MAP)
+    return {"ok": True, "channel": channel, "removed": removed}
+
+@app.get("/voices")
+async def list_voices():
+    """List all available voice clone files"""
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        try:
+            resp = await c.get(f"{TTS_BASE_URL}/speakers")
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Backend unavailable: {e}")
+    raise HTTPException(status_code=502, detail="Could not fetch voices from backend")
+
 
 @app.post("/voices/ingest")
 async def ingest_voice(request: Request):
