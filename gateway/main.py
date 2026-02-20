@@ -284,17 +284,19 @@ async def synthesize_openai(text: str, voice: str, format: str, language: str = 
 
 async def synthesize(text: str, voice: str = "default", format: str = "wav", language: str = "auto", instruct: str = None, channel: Optional[str] = None) -> bytes:
     """Route to appropriate TTS backend"""
-    # Resolve voice: per-channel map → DEFAULT_VOICE → requested voice
-    resolved_voice = voice
+    # Resolve voice priority:
+    # 1. Per-channel VOICE_MAP (highest — always wins when channel matches)
+    # 2. Explicitly requested voice (use as-is)
+    # 3. DEFAULT_VOICE only when voice is a generic placeholder
+    _generic = {"default", "v", "", None}
     if channel and channel in VOICE_MAP:
-        resolved_voice = VOICE_MAP[channel]
-        logger.info(f"Channel '{channel}' → voice '{resolved_voice}' (from VOICE_MAP)")
+        voice = VOICE_MAP[channel]
+        logger.info(f"Channel '{channel}' → voice '{voice}' (VOICE_MAP)")
+    elif voice not in _generic:
+        logger.info(f"Using requested voice: {voice}")
     elif DEFAULT_VOICE:
-        resolved_voice = DEFAULT_VOICE
-        logger.info(f"Using DEFAULT_VOICE: {resolved_voice}")
-    else:
-        logger.info(f"Using requested voice: {resolved_voice}")
-    voice = resolved_voice
+        voice = DEFAULT_VOICE
+        logger.info(f"Using DEFAULT_VOICE fallback: {voice}")
     
     if TTS_TYPE == "coqui":
         return await synthesize_coqui(text, voice if voice != "default" else None)
