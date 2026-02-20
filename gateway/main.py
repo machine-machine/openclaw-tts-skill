@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import uuid
 import logging
 import io
@@ -12,7 +13,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Requ
 from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Literal, List
+from typing import Literal, List, Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,7 +49,12 @@ TTS_TYPE = os.getenv("TTS_TYPE", "coqui")  # coqui, openai, piper
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")
 STORAGE_DIR = os.getenv("STORAGE_DIR", "/app/output")
 # Force all requests to use this voice (for voice cloning). Empty = use requested voice.
-DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "vivian")
+DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "")
+# Per-channel voice map: JSON string e.g. '{"telegram": "vivian", "discord": "mario"}'
+# Channel names match OpenClaw channel identifiers (telegram, discord, whatsapp, signal, etc.)
+VOICE_MAP: dict = json.loads(os.getenv("VOICE_MAP", "{}"))
+
+logger.info(f"DEFAULT_VOICE={DEFAULT_VOICE!r}, VOICE_MAP={VOICE_MAP}")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
 app = FastAPI(title="m2 Voice Gateway", version="1.0.0")
@@ -276,12 +282,19 @@ async def synthesize_openai(text: str, voice: str, format: str, language: str = 
         logger.error(f"Concatenation failed: {e}")
         raise HTTPException(status_code=500, detail=f"Audio concatenation failed: {e}")
 
-async def synthesize(text: str, voice: str = "default", format: str = "wav", language: str = "auto", instruct: str = None) -> bytes:
+async def synthesize(text: str, voice: str = "default", format: str = "wav", language: str = "auto", instruct: str = None, channel: Optional[str] = None) -> bytes:
     """Route to appropriate TTS backend"""
-    # Override voice with DEFAULT_VOICE if set (for voice cloning)
-    if DEFAULT_VOICE:
-        voice = DEFAULT_VOICE
-        logger.info(f"Using default voice override: {voice}")
+    # Resolve voice: per-channel map → DEFAULT_VOICE → requested voice
+    resolved_voice = voice
+    if channel and channel in VOICE_MAP:
+        resolved_voice = VOICE_MAP[channel]
+        logger.info(f"Channel '{channel}' → voice '{resolved_voice}' (from VOICE_MAP)")
+    elif DEFAULT_VOICE:
+        resolved_voice = DEFAULT_VOICE
+        logger.info(f"Using DEFAULT_VOICE: {resolved_voice}")
+    else:
+        logger.info(f"Using requested voice: {resolved_voice}")
+    voice = resolved_voice
     
     if TTS_TYPE == "coqui":
         return await synthesize_coqui(text, voice if voice != "default" else None)
@@ -317,7 +330,7 @@ async def health():
     }
 
 @app.post("/v1/audio/speech")
-async def openai_speech(request: SpeechRequest):
+async def openai_speech(request: SpeechRequest, req: Request):
     """OpenAI-compatible TTS endpoint with style instructions"""
     text = request.get_text()
     if not text:
@@ -325,10 +338,11 @@ async def openai_speech(request: SpeechRequest):
     
     fmt = request.get_format()
     instruct = request.get_instruct()
-    logger.info(f"TTS request: voice={request.voice}, format={fmt}, lang={request.language}, instruct={bool(instruct)}, text_len={len(text)}")
+    channel = req.headers.get("X-Channel", "").lower() or None
+    logger.info(f"TTS request: voice={request.voice}, format={fmt}, lang={request.language}, instruct={bool(instruct)}, channel={channel}, text_len={len(text)}")
     
     try:
-        audio = await synthesize(text, request.voice, fmt, request.language, instruct)
+        audio = await synthesize(text, request.voice, fmt, request.language, instruct, channel=channel)
         return Response(
             content=audio,
             media_type=f"audio/{fmt}",
@@ -400,6 +414,109 @@ async def delete_voice(name: str):
     async with httpx.AsyncClient() as c:
         resp = await c.delete(f"{TTS_BASE_URL}/voices/{name}", timeout=30.0)
         return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+
+@app.post("/voices/ingest")
+async def ingest_voice(request: Request):
+    """
+    Upload an audio file (mp3/wav/ogg) + voice name.
+    Automatically transcribes using Speaches (Whisper) if no ref_text provided,
+    then proxies to the TTS backend as a named reference voice.
+    
+    Form fields:
+      - file: audio file (mp3, wav, ogg, flac)
+      - name: voice name (alphanumeric)
+      - ref_text: (optional) transcript — auto-generated via Whisper if omitted
+    """
+    import shutil
+
+    SPEACHES_URL = os.getenv("SPEACHES_URL", "")
+
+    form = await request.form()
+    file = form.get("file")
+    name = form.get("name", "")
+    ref_text = form.get("ref_text", "")
+
+    if not file or not name:
+        raise HTTPException(status_code=422, detail="'file' and 'name' are required")
+
+    safe_name = "".join(c for c in name if c.isalnum() or c == "_").lower()
+    if not safe_name:
+        raise HTTPException(status_code=422, detail="Invalid voice name")
+
+    # Read uploaded audio
+    audio_bytes = await file.read()
+    original_filename = getattr(file, "filename", "upload.wav")
+    ext = os.path.splitext(original_filename)[1].lower() or ".wav"
+
+    with tempfile.TemporaryDirectory(prefix="voice_ingest_") as tmpdir:
+        original_path = os.path.join(tmpdir, f"original{ext}")
+        wav_path = os.path.join(tmpdir, f"{safe_name}.wav")
+
+        # Save original
+        with open(original_path, "wb") as f:
+            f.write(audio_bytes)
+
+        # Transcode to WAV (16kHz mono — ideal for voice cloning)
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", original_path,
+            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+            wav_path
+        ]
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, timeout=60)
+        if result.returncode != 0:
+            logger.error(f"ffmpeg transcode failed: {result.stderr.decode()[-300:]}")
+            raise HTTPException(status_code=500, detail="Audio transcoding failed")
+
+        with open(wav_path, "rb") as f:
+            wav_bytes = f.read()
+
+        # Auto-transcribe if no ref_text provided
+        if not ref_text and SPEACHES_URL:
+            logger.info(f"Auto-transcribing with Speaches ({SPEACHES_URL})...")
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as c:
+                    resp = await c.post(
+                        f"{SPEACHES_URL}/v1/audio/transcriptions",
+                        files={"file": (f"{safe_name}.wav", wav_bytes, "audio/wav")},
+                        data={"model": "Systran/faster-whisper-large-v3", "response_format": "text"},
+                    )
+                    if resp.status_code == 200:
+                        ref_text = resp.text.strip()
+                        logger.info(f"Transcript ({len(ref_text)} chars): {ref_text[:100]}...")
+                    else:
+                        logger.warning(f"Transcription failed ({resp.status_code}): {resp.text[:200]}")
+            except Exception as e:
+                logger.warning(f"Transcription error (continuing without): {e}")
+        elif not ref_text:
+            logger.warning("No SPEACHES_URL set and no ref_text provided — voice will use x_vector_only mode")
+
+        # Proxy to TTS backend
+        logger.info(f"Uploading voice '{safe_name}' to TTS backend...")
+        async with httpx.AsyncClient(timeout=60.0) as c:
+            files = {"file": (f"{safe_name}.wav", wav_bytes, "audio/wav")}
+            data = {"name": safe_name}
+            if ref_text:
+                data["ref_text"] = ref_text
+            else:
+                data["ref_text"] = ""  # Empty — backend uses x_vector_only mode
+
+            resp = await c.post(
+                f"{TTS_BASE_URL}/voices/upload",
+                files=files,
+                data=data,
+            )
+
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=f"Backend error: {resp.text[:300]}")
+
+        return {
+            "ok": True,
+            "voice_name": safe_name,
+            "transcript": ref_text or None,
+            "transcript_source": "provided" if form.get("ref_text") else ("whisper" if ref_text else "none"),
+            "wav_size_bytes": len(wav_bytes),
+        }
+
 
 @app.websocket("/ws/tts")
 async def websocket_tts(websocket: WebSocket):
