@@ -46,6 +46,12 @@ services:
       - TTS_TYPE=openai
       - PUBLIC_URL=http://voice.machinemachine.ai
       - STORAGE_DIR=/app/output
+      # Default voice fallback (empty = use voice from request)
+      - DEFAULT_VOICE=${DEFAULT_VOICE:-vivian}
+      # Per-channel voice map JSON e.g. {"telegram":"vivian","discord":"mario"}
+      - VOICE_MAP=${VOICE_MAP:-{}}
+      # Speaches/Whisper URL for auto-transcription during voice ingest
+      - SPEACHES_URL=${SPEACHES_URL:-}
     volumes:
       - tts_output:/app/output
     depends_on:
