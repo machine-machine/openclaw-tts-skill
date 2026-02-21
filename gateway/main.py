@@ -299,16 +299,37 @@ async def synthesize_openai(text: str, voice: str, format: str, language: str = 
     if len(chunks) == 1:
         return await synthesize_openai_single(chunks[0], voice, format, language, instruct)
     
-    # Generate all chunks (sequentially to avoid GPU contention)
-    audio_chunks = []
-    for i, chunk in enumerate(chunks):
-        logger.info(f"  Chunk {i+1}/{len(chunks)}: {len(chunk)} chars")
-        try:
-            audio = await synthesize_openai_single(chunk, voice, format, language, instruct)
-            audio_chunks.append(audio)
-        except Exception as e:
-            logger.error(f"  Chunk {i+1} failed: {e}")
-            raise
+    # Generate chunks — parallel up to CHUNK_PARALLEL limit
+    CHUNK_PARALLEL = int(os.getenv("CHUNK_PARALLEL", "1"))
+    
+    if CHUNK_PARALLEL <= 1:
+        # Sequential (safe default — avoids GPU contention)
+        audio_chunks = []
+        for i, chunk in enumerate(chunks):
+            logger.info(f"  Chunk {i+1}/{len(chunks)}: {len(chunk)} chars")
+            try:
+                audio = await synthesize_openai_single(chunk, voice, format, language, instruct)
+                audio_chunks.append(audio)
+            except Exception as e:
+                logger.error(f"  Chunk {i+1} failed: {e}")
+                raise
+    else:
+        # Parallel with semaphore — set CHUNK_PARALLEL=2+ to enable
+        sem = asyncio.Semaphore(CHUNK_PARALLEL)
+        logger.info(f"TTS parallel: {len(chunks)} chunks, max_parallel={CHUNK_PARALLEL}")
+
+        async def _gen(i: int, chunk: str):
+            async with sem:
+                logger.info(f"  Chunk {i+1}/{len(chunks)}: {len(chunk)} chars")
+                return await synthesize_openai_single(chunk, voice, format, language, instruct)
+
+        results = await asyncio.gather(*[_gen(i, c) for i, c in enumerate(chunks)], return_exceptions=True)
+        audio_chunks = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.error(f"  Chunk {i+1} failed: {r}")
+                raise r
+            audio_chunks.append(r)
     
     # Concatenate audio chunks
     logger.info(f"Concatenating {len(audio_chunks)} audio chunks...")
