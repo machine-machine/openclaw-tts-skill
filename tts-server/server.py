@@ -37,6 +37,12 @@ DEFAULT_REFERENCE_AUDIO = os.getenv("DEFAULT_REFERENCE_AUDIO", "")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
 
+# CUDA performance optimizations
+if DEVICE == "cuda":
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+
 # CustomVoice speakers (only for customvoice model)
 SPEAKERS = ["aiden", "dylan", "eric", "ono_anna", "ryan", "serena", "sohee", "uncle_fu", "vivian"]
 LANGUAGES = ["auto", "chinese", "english", "japanese", "korean", "french", "german", "spanish", "portuguese", "russian"]
@@ -95,6 +101,43 @@ async def lifespan(app: FastAPI):
         
         model_load_time = time.time() - start
         logger.info(f"Model loaded in {model_load_time:.2f}s (type={MODEL_TYPE})")
+        
+        # Warmup: run a dummy generation to pre-compile CUDA kernels
+        try:
+            warmup_start = time.time()
+            logger.info("Warming up model (dummy generation)...")
+            with torch.no_grad():
+                # Find any reference audio for warmup
+                warmup_ref = None
+                if os.path.isdir(REFERENCE_AUDIO_DIR):
+                    for f in os.listdir(REFERENCE_AUDIO_DIR):
+                        if f.endswith(('.wav', '.mp3', '.ogg', '.flac')):
+                            warmup_ref = os.path.join(REFERENCE_AUDIO_DIR, f)
+                            break
+                
+                if warmup_ref and MODEL_TYPE == "base":
+                    custom_voice_model.generate_voice_clone(
+                        text="Hello.",
+                        language="English",
+                        ref_audio=warmup_ref,
+                        ref_text="warmup",
+                    )
+                elif MODEL_TYPE == "customvoice":
+                    custom_voice_model.generate_custom_voice(
+                        text="Hello.",
+                        language="english",
+                        speaker=DEFAULT_SPEAKER,
+                        non_streaming_mode=True,
+                        max_new_tokens=64,
+                    )
+            
+            # Clear CUDA cache after warmup
+            if DEVICE == "cuda":
+                torch.cuda.empty_cache()
+            
+            logger.info(f"Warmup complete in {time.time() - warmup_start:.2f}s")
+        except Exception as e:
+            logger.warning(f"Warmup failed (non-fatal): {e}")
         
     except Exception as e:
         logger.error(f"Failed to load model: {e}")

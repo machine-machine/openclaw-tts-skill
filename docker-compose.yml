@@ -52,6 +52,9 @@ services:
       - VOICE_MAP=${VOICE_MAP:-{}}
       # Speaches/Whisper URL for auto-transcription during voice ingest
       - SPEACHES_URL=${SPEACHES_URL:-}
+      # Chunking: larger chunks = fewer API calls, parallel = faster for long text
+      - CHUNK_MAX_CHARS=${CHUNK_MAX_CHARS:-400}
+      - CHUNK_PARALLEL=${CHUNK_PARALLEL:-2}
     volumes:
       - tts_output:/app/output
     depends_on:
